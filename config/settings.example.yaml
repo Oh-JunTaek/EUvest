@@ -1,0 +1,65 @@
+# 개인용 AI 자율투자 시스템 — 안전 기본값. 이 파일만으로 거래 불가.
+schema_version: '1.0'
+execution:
+  mode: OFFLINE_SIM          # BACKTEST | OFFLINE_SIM | KIS_PAPER | LIVE
+  allow_live_orders: false
+  kill_switch: true          # 최초에는 신규 거래 금지; offline-sim 샘플에서만 명시적 해제 가능
+  require_broker_reconciliation: true
+  order_type: LIMIT_ONLY
+  market_sessions: REGULAR_ONLY
+markets:
+  KRX: true
+  US: true
+asset_types:
+  STOCK: true
+  ETF: true
+  DOMESTIC_BOND: false
+  FOREIGN_BOND: false
+  LEVERAGED_ETF: false
+  INVERSE_ETF: false
+  DERIVATIVE: false
+capital:
+  cash_only: true
+  allow_margin: false
+  allow_credit: false
+  allow_short: false
+  allow_loans: false
+  allow_auto_fx_conversion: false
+  max_order_notional: null       # LIVE 활성화 전 사용자 구체 설정 필수
+  max_daily_loss: null           # LIVE 활성화 전 사용자 구체 설정 필수
+  max_portfolio_exposure: null   # LIVE 활성화 전 사용자 구체 설정 필수
+universe:
+  allowed_assets: []              # 빈 목록 = 신규 거래 없음
+  ai_may_auto_add_to_allowlist: false
+scheduler:
+  enabled: false                  # 사용자 승인 전 예약 실행 금지
+  interval_minutes: 60           # 예시일 뿐 실제 자동 시작 아님
+  overlap_policy: SKIP
+  catch_up_missed_runs: false
+  max_research_rounds: 3
+ai:
+  provider: fake                  # fake / openai_compatible / ollama
+  model: fixture-default
+  fallback_enabled: false
+  max_calls_per_run: 4
+  max_calls_per_day: 20
+  max_input_tokens: 12000
+  max_output_tokens: 2500
+  timeout_seconds: 60
+  # provider별 실제 비용·개인 실거래 사용권한은 도입 전 확인
+  live_use_verified: false
+  endpoint: null
+broker:
+  name: KIS
+  environment: MOCK             # MOCK / PAPER / LIVE; mode와 매칭 필요
+  account_alias: KIS_PRIMARY
+  quote_max_age_seconds: null   # 상품별 검증 전 LIVE_BLOCKED
+  live_allowed_products: []
+storage:
+  db_path: data/investor.db
+  log_dir: data/logs
+  reports_dir: data/reports
+  timezone_display: Asia/Seoul
+reports:
+  base_currency: KRW
+  include_benchmarks: true

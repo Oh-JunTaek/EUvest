@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "run_id": "demo_run_001",
+  "state_version": 1,
+  "as_of_utc": "2026-10-31T09:00:00Z",
+  "mode": "OFFLINE_SIM",
+  "markets": [
+    "KRX",
+    "US"
+  ],
+  "allowlist": [
+    "KRX:KRX:005930:STOCK",
+    "US:ARCA:VOO:ETF"
+  ],
+  "portfolio": {
+    "cash_weight_bps": 10000,
+    "positions": []
+  },
+  "active_theses": [],
+  "evidence": [
+    {
+      "evidence_id": "ev_001",
+      "kind": "QUOTE",
+      "as_of_utc": "2026-10-31T08:59:55Z",
+      "source": "MOCK_KIS",
+      "summary": "시세 검증용 가상 데이터 (실제 시장자료 아님)"
+    }
+  ],
+  "recent_decisions": [],
+  "rules": {
+    "cash_only": true,
+    "allow_margin": false,
+    "allow_short": false,
+    "note": "모의 전용; 레버리지/미수/파생 불가"
+  }
+}

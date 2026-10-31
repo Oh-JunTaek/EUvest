@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/schema/decision_proposal-1.0",
+  "title": "DecisionProposal v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "state_version",
+    "as_of_utc",
+    "action",
+    "items",
+    "rationale",
+    "evidence_ids",
+    "thesis_updates"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "as_of_utc": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 20
+    },
+    "action": {
+      "enum": [
+        "TRADE",
+        "NO_TRADE"
+      ]
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "asset_id",
+          "side",
+          "target_weight_bps",
+          "rationale",
+          "evidence_ids"
+        ],
+        "properties": {
+          "asset_id": {
+            "type": "string",
+            "minLength": 5
+          },
+          "side": {
+            "enum": [
+              "BUY",
+              "SELL"
+            ]
+          },
+          "target_weight_bps": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 10
+          },
+          "evidence_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 5
+    },
+    "evidence_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "thesis_updates": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "asset_id",
+          "reason",
+          "evidence_ids"
+        ],
+        "properties": {
+          "action": {
+            "enum": [
+              "CREATE",
+              "REVISE",
+              "CLOSE"
+            ]
+          },
+          "asset_id": {
+            "type": "string"
+          },
+          "thesis_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10
+          },
+          "new_premise": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invalidation_conditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "NO_TRADE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "TRADE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/schema/context_envelope-1.0",
+  "title": "ContextEnvelope v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "state_version",
+    "as_of_utc",
+    "mode",
+    "markets",
+    "allowlist",
+    "portfolio",
+    "active_theses",
+    "evidence",
+    "recent_decisions",
+    "rules"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "as_of_utc": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 20
+    },
+    "mode": {
+      "enum": [
+        "BACKTEST",
+        "OFFLINE_SIM",
+        "KIS_PAPER",
+        "LIVE"
+      ]
+    },
+    "markets": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "KRX",
+          "US"
+        ]
+      }
+    },
+    "allowlist": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 5
+      }
+    },
+    "portfolio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cash_weight_bps",
+        "positions"
+      ],
+      "properties": {
+        "cash_weight_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "positions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "asset_id",
+              "weight_bps"
+            ],
+            "properties": {
+              "asset_id": {
+                "type": "string"
+              },
+              "weight_bps": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "unrealized_pnl_pct": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "active_theses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "thesis_id",
+          "asset_id",
+          "version",
+          "premise",
+          "invalidation_conditions",
+          "evidence_ids"
+        ],
+        "properties": {
+          "thesis_id": {
+            "type": "string"
+          },
+          "asset_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "premise": {
+            "type": "string"
+          },
+          "invalidation_conditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "evidence_id",
+          "kind",
+          "as_of_utc",
+          "source",
+          "summary"
+        ],
+        "properties": {
+          "evidence_id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "QUOTE",
+              "OHLCV",
+              "NEWS",
+              "FILING",
+              "MACRO",
+              "INDICATOR",
+              "OTHER"
+            ]
+          },
+          "as_of_utc": {
+            "type": "string",
+            "format": "date-time",
+            "minLength": 20
+          },
+          "source": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "recent_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "decision_id",
+          "summary",
+          "as_of_utc"
+        ],
+        "properties": {
+          "decision_id": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "as_of_utc": {
+            "type": "string",
+            "format": "date-time",
+            "minLength": 20
+          }
+        }
+      }
+    },
+    "rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cash_only",
+        "allow_margin",
+        "allow_short"
+      ],
+      "properties": {
+        "cash_only": {
+          "const": true
+        },
+        "allow_margin": {
+          "const": false
+        },
+        "allow_short": {
+          "const": false
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+config/settings.local.yaml
+data/
+*.db
+*.sqlite3
+*.db-wal
+*.db-shm
+*.log
+KIS*/
+*.pem
+*.key

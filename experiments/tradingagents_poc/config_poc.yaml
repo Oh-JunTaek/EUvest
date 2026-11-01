@@ -1,0 +1,80 @@
+# TradingAgents POC Configuration
+# This is separate from EUvest main settings
+# Copy to .env and fill in your API keys
+
+# ============================================================
+# LLM Provider Settings
+# ============================================================
+
+# --- Ollama (Local) ---
+# No API key needed. Just ensure ollama serve is running.
+TRADINGAGENTS_LLM_PROVIDER=openai_compatible
+TRADINGAGENTS_DEEP_THINK_LLM=qwen3.5:9b
+TRADINGAGENTS_QUICK_THINK_LLM=qwen3.5:9b
+TRADINGAGENTS_DEEP_THINK_PROVIDER=openai_compatible
+TRADINGAGENTS_QUICK_THINK_PROVIDER=openai_compatible
+TRADINGAGENTS_DEEP_THINK_BACKEND_URL=http://localhost:11434/v1
+TRADINGAGENTS_QUICK_THINK_BACKEND_URL=http://localhost:11434/v1
+TRADINGAGENTS_LLM_BACKEND_URL=http://localhost:11434/v1
+
+# --- NVIDIA NIM (Free External API) ---
+# Uncomment and set your API key to use NVIDIA NIM
+# TRADINGAGENTS_LLM_PROVIDER=openai_compatible
+# TRADINGAGENTS_DEEP_THINK_LLM=nvidia/nemotron-3-ultra
+# TRADINGAGENTS_QUICK_THINK_LLM=nvidia/nemotron-3-ultra
+# TRADINGAGENTS_DEEP_THINK_PROVIDER=openai_compatible
+# TRADINGAGENTS_QUICK_THINK_PROVIDER=openai_compatible
+# TRADINGAGENTS_DEEP_THINK_BACKEND_URL=https://integrate.api.nvidia.com/v1
+# TRADINGAGENTS_QUICK_THINK_BACKEND_URL=https://integrate.api.nvidia.com/v1
+# TRADINGAGENTS_LLM_BACKEND_URL=https://integrate.api.nvidia.com/v1
+# NVIDIA_API_KEY=your_nvidia_nim_api_key_here
+
+# ============================================================
+# General Settings
+# ============================================================
+
+# Output language (English, Korean, etc.)
+TRADINGAGENTS_OUTPUT_LANGUAGE=English
+
+# Debate rounds
+TRADINGAGENTS_MAX_DEBATE_ROUNDS=1
+TRADINGAGENTS_MAX_RISK_ROUNDS=1
+TRADINGAGENTS_MAX_TOOL_ROUNDS=2
+
+# Temperature (lower = more deterministic)
+TRADINGAGENTS_TEMPERATURE=0.0
+
+# Token limits
+TRADINGAGENTS_MAX_TOKENS=4096
+
+# Checkpoint (save intermediate states)
+TRADINGAGENTS_CHECKPOINT_ENABLED=true
+
+# Results directory
+TRADINGAGENTS_RESULTS_DIR=./results
+
+# Memory log path (markdown file for decisions)
+TRADINGAGENTS_MEMORY_LOG_PATH=./results/memory_log.md
+
+# Data cache directory
+TRADINGAGENTS_CACHE_DIR=./cache
+
+# Benchmark ticker for alpha calculation
+TRADINGAGENTS_BENCHMARK_TICKER=SPY
+
+# Holding period for backtest reflection (days)
+TRADINGAGENTS_HOLDING_PERIOD_DAYS=5
+
+# ============================================================
+# Data Vendor Configuration
+# ============================================================
+# Options: yfinance, alpha_vantage, sec_edgar, fred, polymarket
+# Alpha Vantage requires ALPHA_VANTAGE_API_KEY
+# FRED requires FRED_API_KEY
+
+# TRADINGAGENTS_DATA_VENDORS_CORE_STOCK_APIS=yfinance
+# TRADINGAGENTS_DATA_VENDORS_TECHNICAL_INDICATORS=yfinance
+# TRADINGAGENTS_DATA_VENDORS_FUNDAMENTAL_DATA=sec_edgar,yfinance
+# TRADINGAGENTS_DATA_VENDORS_NEWS_DATA=yfinance
+# TRADINGAGENTS_DATA_VENDORS_MACRO_DATA=fred
+# TRADINGAGENTS_DATA_VENDORS_PREDICTION_MARKETS=polymarket

@@ -1,0 +1,8 @@
+{
+  "ticker": "AAPL",
+  "trade_date": "2026-11-01",
+  "provider": "ollama",
+  "timestamp": "2026-11-01T10:46:03.462601",
+  "error": "'investment_debate_state'",
+  "error_type": "KeyError"
+}

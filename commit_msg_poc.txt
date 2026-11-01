@@ -1,0 +1,15 @@
+P0-01A: TradingAgents POC 완료
+
+- experiments/tradingagents_poc/ 격리 환경 구성 및 TradingAgents v0.7.1 설치
+- Ollama qwen3.5:9b 로컬 모델로 AAPL, 005930.KS 분석 성공 (Hold 결정)
+- docs/research/TRADINGAGENTS_CODE_REVIEW.md 작성 (코드 리뷰)
+- docs/research/TRADINGAGENTS_POC_RESULTS.md 작성 (POC 실행 결과)
+- TRADINGAGENTS_COMPATIBILITY.md 작성 (호환성 분석, PARTIAL 판정)
+
+주요 발견:
+- Ollama 로컬 모델로 미장/국장 분석 가능 확인
+- 구조화 출력 실패 (qwen3.5:9b function calling 미지원) → 자유 텍스트 폴백
+- 한국 주식 뉴스/공시 미지원, KIS/OpenDART 별도 연동 필요
+- TradingAgents 전체 의존성 추가 대신 패턴/모듈 선별 재사용 권장 (PARTIAL)
+
+다음: P0-02 (설정 모델/실행모드 격리) 착수 대기

@@ -1,0 +1,275 @@
+"""설정 모델 - Pydantic v2 기반, 환경변수/YAML 로드 및 검증."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from invest_agent.domain.enums import (
+    BrokerEnvironment,
+    ExecutionMode,
+    LLMProvider,
+)
+
+
+class MarketConfig(BaseModel):
+    KRX: bool = True
+    US: bool = True
+
+
+class AssetTypeConfig(BaseModel):
+    STOCK: bool = True
+    ETF: bool = True
+    DOMESTIC_BOND: bool = False
+    FOREIGN_BOND: bool = False
+    LEVERAGED_ETF: bool = False
+    INVERSE_ETF: bool = False
+    DERIVATIVE: bool = False
+
+
+class CapitalConfig(BaseModel):
+    cash_only: bool = True
+    allow_margin: bool = False
+    allow_credit: bool = False
+    allow_short: bool = False
+    allow_loans: bool = False
+    allow_auto_fx_conversion: bool = False
+    max_order_notional: int | None = Field(default=None, ge=0)
+    max_daily_loss: int | None = Field(default=None, ge=0)
+    max_portfolio_exposure: int | None = Field(default=None, ge=0)
+
+
+class UniverseConfig(BaseModel):
+    allowed_assets: list[str] = Field(default_factory=list)
+    ai_may_auto_add_to_allowlist: bool = False
+
+
+class SchedulerConfig(BaseModel):
+    enabled: bool = False
+    interval_minutes: int = Field(default=60, ge=1, le=1440)
+    overlap_policy: Literal["SKIP", "QUEUE"] = "SKIP"
+    catch_up_missed_runs: bool = False
+    max_research_rounds: int = Field(default=3, ge=0, le=10)
+
+
+class AIConfig(BaseModel):
+    provider: LLMProvider = LLMProvider.FAKE
+    model: str = "fixture-default"
+    fallback_enabled: bool = False
+    max_calls_per_run: int = Field(default=4, ge=0, le=50)
+    max_calls_per_day: int = Field(default=20, ge=0, le=500)
+    max_input_tokens: int = Field(default=12000, ge=0)
+    max_output_tokens: int = Field(default=2500, ge=0)
+    timeout_seconds: int = Field(default=60, ge=5, le=300)
+    live_use_verified: bool = False
+    endpoint: str | None = None
+
+
+class BrokerConfig(BaseModel):
+    name: str = "KIS"
+    environment: BrokerEnvironment = BrokerEnvironment.MOCK
+    account_alias: str = "KIS_PRIMARY"
+    quote_max_age_seconds: int | None = None
+    live_allowed_products: list[str] = Field(default_factory=list)
+
+
+class StorageConfig(BaseModel):
+    db_path: str = "data/investor.db"
+    log_dir: str = "data/logs"
+    reports_dir: str = "data/reports"
+    timezone_display: str = "Asia/Seoul"
+
+
+class ReportsConfig(BaseModel):
+    base_currency: str = "KRW"
+    include_benchmarks: bool = True
+
+
+class ExecutionConfig(BaseModel):
+    mode: ExecutionMode = ExecutionMode.OFFLINE_SIM
+    allow_live_orders: bool = False
+    kill_switch: bool = True
+    require_broker_reconciliation: bool = True
+    order_type: Literal["LIMIT_ONLY", "LIMIT", "MARKET"] = "LIMIT_ONLY"
+    market_sessions: Literal["REGULAR_ONLY", "ALL"] = "REGULAR_ONLY"
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_nested_delimiter="__",
+        extra="ignore",
+        validate_default=True,
+    )
+
+    schema_version: str = "1.0"
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    markets: MarketConfig = Field(default_factory=MarketConfig)
+    asset_types: AssetTypeConfig = Field(default_factory=AssetTypeConfig)
+    capital: CapitalConfig = Field(default_factory=CapitalConfig)
+    universe: UniverseConfig = Field(default_factory=UniverseConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    ai: AIConfig = Field(default_factory=AIConfig)
+    broker: BrokerConfig = Field(default_factory=BrokerConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    reports: ReportsConfig = Field(default_factory=ReportsConfig)
+
+    @field_validator("execution", mode="before")
+    @classmethod
+    def _coerce_execution_mode(cls, v: Any) -> ExecutionConfig:
+        if isinstance(v, dict):
+            return ExecutionConfig(**v)
+        return v
+
+    @field_validator("markets", mode="before")
+    @classmethod
+    def _coerce_markets(cls, v: Any) -> MarketConfig:
+        if isinstance(v, dict):
+            return MarketConfig(**v)
+        return v
+
+    @field_validator("asset_types", mode="before")
+    @classmethod
+    def _coerce_asset_types(cls, v: Any) -> AssetTypeConfig:
+        if isinstance(v, dict):
+            return AssetTypeConfig(**v)
+        return v
+
+    @field_validator("capital", mode="before")
+    @classmethod
+    def _coerce_capital(cls, v: Any) -> CapitalConfig:
+        if isinstance(v, dict):
+            return CapitalConfig(**v)
+        return v
+
+    @field_validator("universe", mode="before")
+    @classmethod
+    def _coerce_universe(cls, v: Any) -> UniverseConfig:
+        if isinstance(v, dict):
+            return UniverseConfig(**v)
+        return v
+
+    @field_validator("scheduler", mode="before")
+    @classmethod
+    def _coerce_scheduler(cls, v: Any) -> SchedulerConfig:
+        if isinstance(v, dict):
+            return SchedulerConfig(**v)
+        return v
+
+    @field_validator("ai", mode="before")
+    @classmethod
+    def _coerce_ai(cls, v: Any) -> AIConfig:
+        if isinstance(v, dict):
+            return AIConfig(**v)
+        return v
+
+    @field_validator("broker", mode="before")
+    @classmethod
+    def _coerce_broker(cls, v: Any) -> BrokerConfig:
+        if isinstance(v, dict):
+            return BrokerConfig(**v)
+        return v
+
+    @field_validator("storage", mode="before")
+    @classmethod
+    def _coerce_storage(cls, v: Any) -> StorageConfig:
+        if isinstance(v, dict):
+            return StorageConfig(**v)
+        return v
+
+    @field_validator("reports", mode="before")
+    @classmethod
+    def _coerce_reports(cls, v: Any) -> ReportsConfig:
+        if isinstance(v, dict):
+            return ReportsConfig(**v)
+        return v
+    @model_validator(mode="after")
+    def _validate_mode_consistency(self) -> Settings:
+        exec_mode = self.execution.mode
+        broker_env = self.broker.environment
+        allow_live = self.execution.allow_live_orders
+        kill_switch = self.execution.kill_switch
+
+        if exec_mode == ExecutionMode.LIVE:
+            if broker_env != BrokerEnvironment.LIVE:
+                raise ValueError(
+                    f"LIVE 모드에서는 broker.environment가 LIVE여야 함 (현재: {broker_env})"
+                )
+            if not allow_live:
+                raise ValueError("LIVE 모드에서는 execution.allow_live_orders=true 여야 함")
+            if kill_switch:
+                raise ValueError("LIVE 모드에서는 kill_switch=false 여야 함")
+
+        if exec_mode == ExecutionMode.KIS_PAPER:
+            if broker_env != BrokerEnvironment.PAPER:
+                raise ValueError(
+                    f"KIS_PAPER 모드에서는 broker.environment가 PAPER여야 함 (현재: {broker_env})"
+                )
+            if allow_live:
+                raise ValueError("KIS_PAPER 모드에서는 allow_live_orders=false 여야 함")
+
+        if exec_mode in (ExecutionMode.OFFLINE_SIM, ExecutionMode.BACKTEST):
+            if broker_env not in (BrokerEnvironment.MOCK, BrokerEnvironment.PAPER):
+                raise ValueError(
+                    f"{exec_mode} 모드에서는 broker.environment가 MOCK 또는 PAPER여야 함 (현재: {broker_env})"
+                )
+            if allow_live:
+                raise ValueError(f"{exec_mode} 모드에서는 allow_live_orders=false 여야 함")
+
+        if exec_mode != ExecutionMode.LIVE and not kill_switch:
+            raise ValueError("LIVE 모드가 아니면 kill_switch=true여야 함 (안전 기본값)")
+
+        if self.scheduler.enabled and exec_mode in (ExecutionMode.BACKTEST, ExecutionMode.OFFLINE_SIM):
+            raise ValueError(f"{exec_mode} 모드에서는 scheduler.enabled=false여야 함")
+
+        return self
+
+    def is_live_mode(self) -> bool:
+        return self.execution.mode == ExecutionMode.LIVE
+
+    def is_paper_mode(self) -> bool:
+        return self.execution.mode == ExecutionMode.KIS_PAPER
+
+    def is_offline_mode(self) -> bool:
+        return self.execution.mode in (ExecutionMode.OFFLINE_SIM, ExecutionMode.BACKTEST)
+
+    def get_allowed_asset_ids(self) -> list[str]:
+        return [a.strip().upper() for a in self.universe.allowed_assets if a.strip()]
+
+
+def load_settings(config_path: str | Path | None = None) -> Settings:
+    if config_path is None:
+        config_path = Path("config/settings.local.yaml")
+
+    path = Path(config_path)
+    if not path.exists():
+        example_path = Path("config/settings.example.yaml")
+        if example_path.exists():
+            raise FileNotFoundError(
+                f"설정 파일 없음: {path}. {example_path}를 복사하여 {path}로 생성하세요."
+            )
+        raise FileNotFoundError(f"설정 파일 없음: {path}")
+
+    import yaml
+
+    with open(path, encoding="utf-8") as f:
+        yaml_data = yaml.safe_load(f) or {}
+
+    return Settings(**yaml_data)
+
+
+_settings: Settings | None = None
+
+
+def get_settings() -> Settings:
+    global _settings
+    if _settings is None:
+        _settings = load_settings()
+    return _settings
+
+
+def reset_settings() -> None:
+    global _settings
+    _settings = None

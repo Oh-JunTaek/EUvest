@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import tempfile
 import os
+import tempfile
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -27,20 +26,22 @@ from invest_agent.domain.models import (
     Thesis,
 )
 from invest_agent.storage.repositories import (
-    ThesisRepository,
-    EvidenceRepository,
-    DecisionRepository,
     AgentRunRepository,
-    OrderRepository,
-    HandoffRepository,
+    DecisionRepository,
     EquitySnapshotRepository,
+    EvidenceRepository,
+    HandoffRepository,
+    OrderRepository,
+    ThesisRepository,
 )
 from invest_agent.storage.schema import (
     ensure_db,
     get_schema_version,
-    migrate,
     init_db,
+    migrate,
 )
+
+
 class TestThesisRepository:
     """Thesis 리포지토리 테스트."""
 
@@ -574,15 +575,270 @@ class TestEquitySnapshotRepository:
 
 
 class TestSchemaAndMigration:
-    def setup_method(self):
-        pass
-    def test_dummy(self):
-        assert True
+    """스키마 초기화 및 마이그레이션 테스트."""
 
-
-class TestSchemaAndMigration:
     def setup_method(self):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = Path(self.temp_dir) / "test.db"
 
-# Final append marker
+    def teardown_method(self):
+        if self.db_path.exists():
+            self.db_path.unlink()
+        os.rmdir(self.temp_dir)
+
+    def test_init_db_creates_all_tables(self):
+        init_db(self.db_path)
+        import sqlite3
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            table_names = [t[0] for t in tables]
+            expected = {"theses", "evidence", "decisions", "agent_runs", "orders", "handoffs", "equity_snapshots", "schema_version"}
+            for t in expected:
+                assert t in table_names, f"Table {t} not created"
+        finally:
+            conn.close()
+
+    def test_foreign_keys_enforced(self):
+        init_db(self.db_path)
+        import sqlite3
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO evidence (id, thesis_id, evidence_type, source, observed_at, collected_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(uuid4()), str(uuid4()), "PRICE", "test", datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+                )
+        finally:
+            conn.close()
+
+    def test_schema_version_recorded(self):
+        init_db(self.db_path)
+        version = get_schema_version(self.db_path)
+        assert version == 1
+
+    def test_migrate_idempotent(self):
+        init_db(self.db_path)
+        migrate(self.db_path)
+        version = get_schema_version(self.db_path)
+        assert version == 1
+
+    def test_wal_mode_enabled(self):
+        init_db(self.db_path)
+        import sqlite3
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            assert mode.upper() == "WAL"
+        finally:
+            conn.close()
+
+
+class TestDataIntegrity:
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test.db"
+        ensure_db(self.db_path)
+
+    def teardown_method(self):
+        if self.db_path.exists():
+            self.db_path.unlink()
+        os.rmdir(self.temp_dir)
+
+    def test_decimal_precision_preserved_through_roundtrip(self):
+        from invest_agent.domain.models import (
+            AgentRun,
+            Decision,
+            DecisionOutcome,
+            RunStatus,
+            Thesis,
+        )
+        from invest_agent.storage.repositories import (
+            AgentRunRepository,
+            DecisionRepository,
+            OrderRepository,
+            ThesisRepository,
+        )
+
+        # Create required foreign key references
+        thesis_repo = ThesisRepository(self.db_path)
+        thesis = Thesis(id=uuid4(), asset_id="KRX:005930", hypothesis="H1", rationale="R1")
+        thesis_repo.save(thesis)
+
+        run_repo = AgentRunRepository(self.db_path)
+        run = AgentRun(id=uuid4(), status=RunStatus.COMPLETED, execution_mode="OFFLINE_SIM")
+        run_repo.save(run)
+
+        decision_repo = DecisionRepository(self.db_path)
+        decision = Decision(id=uuid4(), thesis_id=thesis.id, run_id=run.id, outcome=DecisionOutcome.TRADE, rationale="test")
+        decision_repo.save(decision)
+
+        repo = OrderRepository(self.db_path)
+        order = OrderRecord(
+            id=uuid4(),
+            run_id=run.id,
+            decision_id=decision.id,
+            asset_id="KRX:005930",
+            side=OrderSide.BUY,
+            order_type="LIMIT",
+            quantity=Decimal("10.123456789"),
+            price=Decimal("70000.12345"),
+            status=OrderStatus.ACKNOWLEDGED,
+        )
+        repo.save(order)
+        retrieved = repo.get(order.id)
+        assert retrieved.quantity == Decimal("10.123456789")
+        assert retrieved.price == Decimal("70000.12345")
+
+    def test_utc_timestamps_preserved(self):
+        from invest_agent.storage.repositories import ThesisRepository
+        repo = ThesisRepository(self.db_path)
+        t = Thesis(id=uuid4(), asset_id="KRX:005930", hypothesis="H1", rationale="R1")
+        repo.save(t)
+        retrieved = repo.get(t.id)
+        assert retrieved.created_at.tzinfo is None
+        assert retrieved.updated_at.tzinfo is None
+
+    def test_execution_mode_recorded(self):
+        from invest_agent.storage.repositories import AgentRunRepository
+        repo = AgentRunRepository(self.db_path)
+        run = AgentRun(id=uuid4(), status=RunStatus.COMPLETED, execution_mode="KIS_PAPER")
+        repo.save(run)
+        retrieved = repo.get(run.id)
+        assert retrieved.execution_mode == "KIS_PAPER"
+
+    def test_duplicate_save_is_upsert(self):
+        from invest_agent.storage.repositories import ThesisRepository
+        repo = ThesisRepository(self.db_path)
+        thesis = Thesis(id=uuid4(), asset_id="KRX:005930", hypothesis="H1", rationale="R1")
+        repo.save(thesis)
+        thesis.hypothesis = "H1_updated"
+        repo.save(thesis)
+        retrieved = repo.get(thesis.id)
+        assert retrieved.hypothesis == "H1_updated"
+
+    def test_restrict_delete_thesis_preserves_evidence(self):
+        """FK가 RESTRICT이므로 가설 삭제 시 증거가 있으면 삭제 실패해야 함."""
+        import sqlite3
+
+        from invest_agent.storage.repositories import EvidenceRepository, ThesisRepository
+        thesis_repo = ThesisRepository(self.db_path)
+        evidence_repo = EvidenceRepository(self.db_path)
+
+        thesis = Thesis(id=uuid4(), asset_id="KRX:005930", hypothesis="H1", rationale="R1")
+        thesis_repo.save(thesis)
+
+        evidence = Evidence(id=uuid4(), thesis_id=thesis.id, evidence_type=EvidenceType.PRICE, source="test", observed_at=datetime.utcnow(), collected_at=datetime.utcnow(), content={})
+        evidence_repo.save(evidence)
+
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            conn.execute("DELETE FROM theses WHERE id = ?", (str(thesis.id),))
+            conn.commit()
+            assert False, "Should have raised IntegrityError due to RESTRICT FK"
+        except sqlite3.IntegrityError:
+            pass  # Expected
+        finally:
+            conn.close()
+
+        # 증거가 그대로 유지되어야 함
+        assert evidence_repo.get(evidence.id) is not None
+
+
+
+
+class TestProviderSwitching:
+    def test_env_overrides_yaml_when_yaml_is_default(self):
+        import tempfile
+
+        from invest_agent.settings import load_settings
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            import yaml
+            yaml.dump({
+                "schema_version": "1.0",
+                "execution": {"mode": "OFFLINE_SIM", "kill_switch": True},
+                "ai": {"provider": "fake", "model": "fixture-default", "endpoint": None},
+            }, f)
+            temp_path = f.name
+        try:
+            os.environ["INVEST_LLM_BASE_URL"] = "https://test.api/v1"
+            os.environ["INVEST_LLM_MODEL"] = "test-model"
+            os.environ["INVEST_LLM_API_KEY"] = "test-key"
+            s = load_settings(temp_path)
+            assert s.ai.endpoint == "https://test.api/v1"
+            assert s.ai.model == "test-model"
+            assert s.ai.api_key == "test-key"
+        finally:
+            os.unlink(temp_path)
+            for k in ["INVEST_LLM_BASE_URL", "INVEST_LLM_MODEL", "INVEST_LLM_API_KEY"]:
+                os.environ.pop(k, None)
+
+    def test_ollama_provider_from_env(self):
+        import tempfile
+
+        from invest_agent.settings import load_settings
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            import yaml
+            yaml.dump({
+                "schema_version": "1.0",
+                "execution": {"mode": "OFFLINE_SIM", "kill_switch": True},
+                "ai": {"provider": "ollama", "model": "fixture-default"},
+            }, f)
+            temp_path = f.name
+        try:
+            os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434/v1"
+            os.environ["OLLAMA_MODEL"] = "qwen3.5:9b"
+            s = load_settings(temp_path)
+            assert s.ai.provider == "ollama"
+            assert s.ai.endpoint == "http://localhost:11434/v1"
+            assert s.ai.model == "qwen3.5:9b"
+        finally:
+            os.unlink(temp_path)
+            for k in ["OLLAMA_BASE_URL", "OLLAMA_MODEL"]:
+                os.environ.pop(k, None)
+
+    def test_yaml_explicit_value_not_overridden(self):
+        import tempfile
+
+        from invest_agent.settings import load_settings
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            import yaml
+            yaml.dump({
+                "schema_version": "1.0",
+                "execution": {"mode": "OFFLINE_SIM", "kill_switch": True},
+                "ai": {"provider": "openai_compatible", "model": "explicit-model", "endpoint": "https://explicit.api/v1"},
+            }, f)
+            temp_path = f.name
+        try:
+            os.environ["INVEST_LLM_BASE_URL"] = "https://env.api/v1"
+            os.environ["INVEST_LLM_MODEL"] = "env-model"
+            s = load_settings(temp_path)
+            assert s.ai.model == "explicit-model"
+            assert s.ai.endpoint == "https://explicit.api/v1"
+        finally:
+            os.unlink(temp_path)
+            for k in ["INVEST_LLM_BASE_URL", "INVEST_LLM_MODEL"]:
+                os.environ.pop(k, None)
+
+    def test_secret_keys_not_in_logs(self):
+        import tempfile
+
+        from invest_agent.settings import load_settings
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            import yaml
+            yaml.dump({
+                "schema_version": "1.0",
+                "execution": {"mode": "OFFLINE_SIM", "kill_switch": True},
+                "ai": {"provider": "openai_compatible", "model": "test", "endpoint": "https://api.test/v1", "api_key": "secret-key-123"},
+            }, f)
+            temp_path = f.name
+        try:
+            s = load_settings(temp_path)
+            assert s.ai.api_key == "secret-key-123"
+            assert "secret-key-123" not in repr(s)
+        finally:
+            os.unlink(temp_path)
+
+

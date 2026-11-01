@@ -33,7 +33,7 @@ DDL_STATEMENTS = [
         content TEXT NOT NULL DEFAULT '{}',
         raw_ref TEXT NOT NULL DEFAULT '',
         metadata TEXT NOT NULL DEFAULT '{}',
-        FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE CASCADE
+        FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE RESTRICT
     )
     """,
     # decisions 테이블
@@ -54,8 +54,8 @@ DDL_STATEMENTS = [
         decided_at TEXT NOT NULL,
         error TEXT,
         metadata TEXT NOT NULL DEFAULT '{}',
-        FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE CASCADE,
-        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE RESTRICT,
+        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT
     )
     """,
     # agent_runs 테이블
@@ -96,8 +96,8 @@ DDL_STATEMENTS = [
         tax TEXT NOT NULL DEFAULT '0',
         error TEXT,
         metadata TEXT NOT NULL DEFAULT '{}',
-        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
-        FOREIGN KEY (decision_id) REFERENCES decisions(id) ON DELETE CASCADE
+        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT,
+        FOREIGN KEY (decision_id) REFERENCES decisions(id) ON DELETE RESTRICT
     )
     """,
     # handoffs 테이블
@@ -117,9 +117,9 @@ DDL_STATEMENTS = [
         model_name_from TEXT NOT NULL,
         model_name_to TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        FOREIGN KEY (from_run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
-        FOREIGN KEY (to_run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
-        FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE CASCADE
+        FOREIGN KEY (from_run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT,
+        FOREIGN KEY (to_run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT,
+        FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE RESTRICT
     )
     """,
     # equity_snapshots 테이블
@@ -134,7 +134,7 @@ DDL_STATEMENTS = [
         unrealized_pnl TEXT NOT NULL DEFAULT '0',
         realized_pnl TEXT NOT NULL DEFAULT '0',
         metadata TEXT NOT NULL DEFAULT '{}',
-        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT
     )
     """,
     # 인덱스
@@ -164,6 +164,10 @@ DDL_STATEMENTS = [
 INITIAL_VERSION_DDL = """
 INSERT OR IGNORE INTO schema_version (version) VALUES (1)
 """
+INITIAL_VERSION_DDL = """
+INSERT OR IGNORE INTO schema_version (version) VALUES (1)
+"""
+
 def get_connection(db_path: str | Path) -> sqlite3.Connection:
     """SQLite 연결 생성 (외래키 활성화, WAL 모드)."""
     conn = sqlite3.connect(str(db_path))

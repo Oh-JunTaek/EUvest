@@ -75,6 +75,18 @@ class AIConfig(BaseModel):
     endpoint: str | None = None
     api_key: str | None = None
 
+    def __repr__(self) -> str:
+        # 민감한 정보 마스킹
+        return (f"AIConfig(provider={self.provider!r}, model={self.model!r}, "
+                f"endpoint={self.endpoint!r}, api_key={'***' if self.api_key else None}, "
+                f"fallback_enabled={self.fallback_enabled!r}, "
+                f"max_calls_per_run={self.max_calls_per_run!r}, "
+                f"max_calls_per_day={self.max_calls_per_day!r}, "
+                f"max_input_tokens={self.max_input_tokens!r}, "
+                f"max_output_tokens={self.max_output_tokens!r}, "
+                f"timeout_seconds={self.timeout_seconds!r}, "
+                f"live_use_verified={self.live_use_verified!r})")
+
 
 class BrokerConfig(BaseModel):
     name: str = "KIS"

@@ -46,9 +46,16 @@ class ThesisRepository:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO theses
+                INSERT INTO theses
                 (id, asset_id, hypothesis, rationale, created_at, updated_at, is_active, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    asset_id=excluded.asset_id,
+                    hypothesis=excluded.hypothesis,
+                    rationale=excluded.rationale,
+                    updated_at=excluded.updated_at,
+                    is_active=excluded.is_active,
+                    metadata=excluded.metadata
                 """,
                 (
                     str(thesis.id),
@@ -127,9 +134,18 @@ class EvidenceRepository:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO evidence
+                INSERT INTO evidence
                 (id, thesis_id, evidence_type, source, observed_at, collected_at, content, raw_ref, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    thesis_id=excluded.thesis_id,
+                    evidence_type=excluded.evidence_type,
+                    source=excluded.source,
+                    observed_at=excluded.observed_at,
+                    collected_at=excluded.collected_at,
+                    content=excluded.content,
+                    raw_ref=excluded.raw_ref,
+                    metadata=excluded.metadata
                 """,
                 (
                     str(evidence.id),
@@ -284,10 +300,21 @@ class AgentRunRepository:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO agent_runs
+                INSERT INTO agent_runs
                 (id, started_at, completed_at, status, execution_mode, schedule_id,
                  thesis_ids, decision_ids, order_ids, error, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    started_at=excluded.started_at,
+                    completed_at=excluded.completed_at,
+                    status=excluded.status,
+                    execution_mode=excluded.execution_mode,
+                    schedule_id=excluded.schedule_id,
+                    thesis_ids=excluded.thesis_ids,
+                    decision_ids=excluded.decision_ids,
+                    order_ids=excluded.order_ids,
+                    error=excluded.error,
+                    metadata=excluded.metadata
                 """,
                 (
                     str(run.id),
@@ -363,11 +390,30 @@ class OrderRepository:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO orders
+                INSERT INTO orders
                 (id, run_id, decision_id, asset_id, side, order_type, quantity, price, status,
                  broker_order_id, submitted_at, acknowledged_at, filled_at, filled_quantity,
                  filled_price, commission, tax, error, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    decision_id=excluded.decision_id,
+                    asset_id=excluded.asset_id,
+                    side=excluded.side,
+                    order_type=excluded.order_type,
+                    quantity=excluded.quantity,
+                    price=excluded.price,
+                    status=excluded.status,
+                    broker_order_id=excluded.broker_order_id,
+                    submitted_at=excluded.submitted_at,
+                    acknowledged_at=excluded.acknowledged_at,
+                    filled_at=excluded.filled_at,
+                    filled_quantity=excluded.filled_quantity,
+                    filled_price=excluded.filled_price,
+                    commission=excluded.commission,
+                    tax=excluded.tax,
+                    error=excluded.error,
+                    metadata=excluded.metadata
                 """,
                 (
                     str(order.id),
@@ -459,11 +505,25 @@ class HandoffRepository:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO handoffs
+                INSERT INTO handoffs
                 (id, from_run_id, to_run_id, thesis_id, previous_decision_id,
                  previous_outcome, new_outcome, changed, change_reason,
                  model_provider_from, model_provider_to, model_name_from, model_name_to, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    from_run_id=excluded.from_run_id,
+                    to_run_id=excluded.to_run_id,
+                    thesis_id=excluded.thesis_id,
+                    previous_decision_id=excluded.previous_decision_id,
+                    previous_outcome=excluded.previous_outcome,
+                    new_outcome=excluded.new_outcome,
+                    changed=excluded.changed,
+                    change_reason=excluded.change_reason,
+                    model_provider_from=excluded.model_provider_from,
+                    model_provider_to=excluded.model_provider_to,
+                    model_name_from=excluded.model_name_from,
+                    model_name_to=excluded.model_name_to,
+                    created_at=excluded.created_at
                 """,
                 (
                     str(handoff.id),
@@ -537,10 +597,19 @@ class EquitySnapshotRepository:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO equity_snapshots
+                INSERT INTO equity_snapshots
                 (id, run_id, timestamp, total_equity, cash_balance, positions,
                  unrealized_pnl, realized_pnl, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    timestamp=excluded.timestamp,
+                    total_equity=excluded.total_equity,
+                    cash_balance=excluded.cash_balance,
+                    positions=excluded.positions,
+                    unrealized_pnl=excluded.unrealized_pnl,
+                    realized_pnl=excluded.realized_pnl,
+                    metadata=excluded.metadata
                 """,
                 (
                     str(snapshot.id),

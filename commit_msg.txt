@@ -1,9 +1,12 @@
-P0-02: 설정 모델/실행모드 격리 구현
+P0-03: SQLite 스토리지/리포지토리 수정 및 검증 완료 (v2)
 
-- src/invest_agent/domain/enums.py: 도메인 열거형 추가 (Market, AssetType, ExecutionMode, RunStatus, OrderSide, OrderType, OrderStatus, CashFlowType, LLMProvider, BrokerEnvironment, AssetEligibility)
-- src/invest_agent/settings.py: Pydantic v2 기반 설정 모델 구현 (YAML + 환경변수 로드, 실행 모드/브로커 환경 일관성 검증)
-- config/settings.example.yaml: 안전 기본값 예제 파일 (기존 유지)
-- config/.env.example: 환경변수 예제 파일 (기존 유지)
-- tests/unit/test_settings.py: 32개 단위 테스트 작성 (실행 모드 검증, LIVE/KIS_PAPER/OFFLINE_SIM 일관성, YAML 로드, 싱글톤 패턴)
+- src/invest_agent/storage/schema.py: 모든 FK를 ON DELETE CASCADE → RESTRICT로 변경 (데이터 삭제 위험 차단)
+- src/invest_agent/storage/repositories.py: 모든 INSERT OR REPLACE → ON CONFLICT(id) DO UPDATE SET ... 명시적 UPSERT 변경 (자식 레코드 보호)
+- src/invest_agent/storage/schema.py: 마이그레이션 프레임워크 골격 유지 (버전별 DDL 확장 가능)
+- src/invest_agent/settings.py: AIConfig.__repr__ 추가로 API 키 마스킹
+- tests/unit/test_storage.py: 37개 단위 테스트 (CRUD, 외래키 제약, Decimal 정밀도, UTC 타임스탬프, 실행모드 기록, UPSERT 시 자식 보존, RESTRICT FK 검증, 공급자 전환, 설정 우선순위, 시크릿 마스킹)
+- tests/unit/test_settings.py: 32개 단위 테스트 (실행 모드 검증, LIVE/KIS_PAPER/OFFLINE_SIM 일관성, YAML 로드, 싱글톤 패턴)
 
-검증: 32 passed, ruff clean
+검증: 69 passed, ruff clean
+실제 API 인증: NOT_TESTED (키 없음)
+계좌/주문: READ_ONLY / NO_LIVE

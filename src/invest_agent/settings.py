@@ -8,6 +8,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# .env 파일을 os.environ에 로드 (모델 밸리데이터에서 사용 가능하도록)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from invest_agent.domain.enums import (
     BrokerEnvironment,
     ExecutionMode,
@@ -66,6 +73,7 @@ class AIConfig(BaseModel):
     timeout_seconds: int = Field(default=60, ge=5, le=300)
     live_use_verified: bool = False
     endpoint: str | None = None
+    api_key: str | None = None
 
 
 class BrokerConfig(BaseModel):
@@ -185,6 +193,55 @@ class Settings(BaseSettings):
         if isinstance(v, dict):
             return ReportsConfig(**v)
         return v
+    @model_validator(mode="before")
+    @classmethod
+    def _map_invest_llm_env(cls, v: Any) -> Any:
+        """INVEST_LLM_* 환경변수를 AI 설정으로 매핑. YAML의 null/빈 값은 환경변수로 덮어쓰기."""
+        if not isinstance(v, dict):
+            return v
+
+        import os
+
+        ai_config = v.get("ai", {})
+        if isinstance(ai_config, dict):
+            # INVEST_LLM_BASE_URL -> endpoint (YAML이 null이거나 없는 경우에만)
+            if not ai_config.get("endpoint"):
+                env_endpoint = os.getenv("INVEST_LLM_BASE_URL")
+                if env_endpoint:
+                    ai_config["endpoint"] = env_endpoint
+
+            # INVEST_LLM_MODEL -> model (YAML이 fixture-default이거나 없는 경우에만)
+            if not ai_config.get("model") or ai_config.get("model") == "fixture-default":
+                env_model = os.getenv("INVEST_LLM_MODEL")
+                if env_model:
+                    ai_config["model"] = env_model
+
+            # INVEST_LLM_API_KEY -> api_key (YAML에 없는 경우에만)
+            if not ai_config.get("api_key"):
+                env_api_key = os.getenv("INVEST_LLM_API_KEY")
+                if env_api_key:
+                    ai_config["api_key"] = env_api_key
+
+            # OLLAMA_BASE_URL -> endpoint (provider가 ollama이고 YAML이 null인 경우)
+            if ai_config.get("provider") == "ollama" and not ai_config.get("endpoint"):
+                ollama_url = os.getenv("OLLAMA_BASE_URL")
+                if ollama_url:
+                    ai_config["endpoint"] = ollama_url
+
+            # OLLAMA_MODEL -> model (provider가 ollama이고 YAML이 fixture-default인 경우)
+            if ai_config.get("provider") == "ollama" and (not ai_config.get("model") or ai_config.get("model") == "fixture-default"):
+                ollama_model = os.getenv("OLLAMA_MODEL")
+                if ollama_model:
+                    ai_config["model"] = ollama_model
+
+            # provider가 명시되지 않았고 INVEST_LLM_*이 있으면 openai_compatible로 추정
+            if not ai_config.get("provider") and (os.getenv("INVEST_LLM_BASE_URL") or os.getenv("INVEST_LLM_MODEL")):
+                ai_config["provider"] = "openai_compatible"
+
+            v["ai"] = ai_config
+
+        return v
+
     @model_validator(mode="after")
     def _validate_mode_consistency(self) -> Settings:
         exec_mode = self.execution.mode
@@ -248,9 +305,12 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         example_path = Path("config/settings.example.yaml")
         if example_path.exists():
             raise FileNotFoundError(
-                f"설정 파일 없음: {path}. {example_path}를 복사하여 {path}로 생성하세요."
+                f"설정 파일 없음: {path}\n"
+                f"  → {example_path}를 복사하여 {path}로 생성하세요.\n"
+                f"  → 복사 명령: copy {example_path} {path} (Windows) 또는 cp {example_path} {path} (Linux/Mac)\n"
+                f"  → 이후 .env 파일에 API 키 등 비밀값을 설정하세요."
             )
-        raise FileNotFoundError(f"설정 파일 없음: {path}")
+        raise FileNotFoundError(f"설정 파일 없음: {path}. 예제 파일도 없습니다.")
 
     import yaml
 

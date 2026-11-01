@@ -1,0 +1,9 @@
+P0-02: 설정 모델/실행모드 격리 구현
+
+- src/invest_agent/domain/enums.py: 도메인 열거형 추가 (Market, AssetType, ExecutionMode, RunStatus, OrderSide, OrderType, OrderStatus, CashFlowType, LLMProvider, BrokerEnvironment, AssetEligibility)
+- src/invest_agent/settings.py: Pydantic v2 기반 설정 모델 구현 (YAML + 환경변수 로드, 실행 모드/브로커 환경 일관성 검증)
+- config/settings.example.yaml: 안전 기본값 예제 파일 (기존 유지)
+- config/.env.example: 환경변수 예제 파일 (기존 유지)
+- tests/unit/test_settings.py: 32개 단위 테스트 작성 (실행 모드 검증, LIVE/KIS_PAPER/OFFLINE_SIM 일관성, YAML 로드, 싱글톤 패턴)
+
+검증: 32 passed, ruff clean

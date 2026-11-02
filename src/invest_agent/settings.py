@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # .env 파일을 os.environ에 로드 (모델 밸리데이터에서 사용 가능하도록)
@@ -73,12 +73,13 @@ class AIConfig(BaseModel):
     timeout_seconds: int = Field(default=60, ge=5, le=300)
     live_use_verified: bool = False
     endpoint: str | None = None
-    api_key: str | None = None
+    api_key: SecretStr | None = None
 
     def __repr__(self) -> str:
-        # 민감한 정보 마스킹
+        # 민감한 정보 마스킹 (SecretStr는 자동으로 마스킹됨)
+        api_key_display = self.api_key.get_secret_value() if self.api_key else None
         return (f"AIConfig(provider={self.provider!r}, model={self.model!r}, "
-                f"endpoint={self.endpoint!r}, api_key={'***' if self.api_key else None}, "
+                f"endpoint={self.endpoint!r}, api_key={'***' if api_key_display else None}, "
                 f"fallback_enabled={self.fallback_enabled!r}, "
                 f"max_calls_per_run={self.max_calls_per_run!r}, "
                 f"max_calls_per_day={self.max_calls_per_day!r}, "

@@ -244,6 +244,58 @@ class TestDecisionRepository:
 
         thesis_decisions = self.repo.get_by_thesis(self.thesis_id)
         assert len(thesis_decisions) == 1
+
+    def test_upsert_preserves_orders(self):
+        """판단 업서트 시 연결된 주문이 유지되는지 검증."""
+        from invest_agent.storage.repositories import OrderRepository
+        from invest_agent.domain.models import OrderRecord, OrderSide, OrderStatus
+        from decimal import Decimal
+
+        # 판단 생성 및 저장
+        decision = Decision(
+            id=uuid4(),
+            thesis_id=self.thesis_id,
+            run_id=self.run_id,
+            outcome=DecisionOutcome.TRADE,
+            side=OrderSide.BUY,
+            target_weight_bps=500,
+            rationale="Initial rationale",
+            model_provider="nvidia",
+            model_name="nemotron",
+            execution_mode="OFFLINE_SIM",
+        )
+        self.repo.save(decision)
+
+        # 해당 판단에 연결된 주문 생성
+        order_repo = OrderRepository(self.db_path)
+        order = OrderRecord(
+            id=uuid4(),
+            run_id=self.run_id,
+            decision_id=decision.id,
+            asset_id="KRX:005930",
+            side=OrderSide.BUY,
+            order_type="LIMIT",
+            quantity=Decimal("10"),
+            price=Decimal("70000"),
+            status=OrderStatus.ACKNOWLEDGED,
+        )
+        order_repo.save(order)
+
+        # 판단 업데이트 (업서트)
+        decision.rationale = "Updated rationale"
+        self.repo.save(decision)
+
+        # 판단이 업데이트되었는지 확인
+        retrieved_decision = self.repo.get(decision.id)
+        assert retrieved_decision.rationale == "Updated rationale"
+
+        # 주문이 그대로 유지되는지 확인 (결정 ID가 변경되지 않아야 함)
+        retrieved_order = order_repo.get(order.id)
+        assert retrieved_order is not None
+        assert retrieved_order.decision_id == decision.id
+        assert retrieved_order.quantity == Decimal("10")
+        assert retrieved_order.price == Decimal("70000")
+
 class TestAgentRunRepository:
     """AgentRun 리포지토리 테스트."""
 
@@ -616,13 +668,13 @@ class TestSchemaAndMigration:
     def test_schema_version_recorded(self):
         init_db(self.db_path)
         version = get_schema_version(self.db_path)
-        assert version == 1
+        assert version == 2
 
     def test_migrate_idempotent(self):
         init_db(self.db_path)
         migrate(self.db_path)
         version = get_schema_version(self.db_path)
-        assert version == 1
+        assert version == 2
 
     def test_wal_mode_enabled(self):
         init_db(self.db_path)
@@ -769,7 +821,7 @@ class TestProviderSwitching:
             s = load_settings(temp_path)
             assert s.ai.endpoint == "https://test.api/v1"
             assert s.ai.model == "test-model"
-            assert s.ai.api_key == "test-key"
+            assert s.ai.api_key.get_secret_value() == "test-key"
         finally:
             os.unlink(temp_path)
             for k in ["INVEST_LLM_BASE_URL", "INVEST_LLM_MODEL", "INVEST_LLM_API_KEY"]:
@@ -836,9 +888,197 @@ class TestProviderSwitching:
             temp_path = f.name
         try:
             s = load_settings(temp_path)
-            assert s.ai.api_key == "secret-key-123"
+            assert s.ai.api_key.get_secret_value() == "secret-key-123"
             assert "secret-key-123" not in repr(s)
         finally:
             os.unlink(temp_path)
 
+
+class TestMigrationFromLegacy:
+    """기존 DB(CASCADE FK)에서 신규 DB(RESTRICT FK)로 마이그레이션 테스트."""
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test.db"
+
+    def teardown_method(self):
+        if self.db_path.exists():
+            self.db_path.unlink()
+        os.rmdir(self.temp_dir)
+
+    def _create_legacy_db_with_cascade_fk(self):
+        """구버전 스키마(CASCADE FK)로 DB 생성."""
+        import sqlite3
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        try:
+            conn.execute('''CREATE TABLE theses (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, hypothesis TEXT NOT NULL, rationale TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1, metadata TEXT NOT NULL DEFAULT '{ }')''')
+            conn.execute('''CREATE TABLE evidence (id TEXT PRIMARY KEY, thesis_id TEXT NOT NULL, evidence_type TEXT NOT NULL, source TEXT NOT NULL, observed_at TEXT NOT NULL, collected_at TEXT NOT NULL, content TEXT NOT NULL DEFAULT '{ }', raw_ref TEXT NOT NULL DEFAULT '', metadata TEXT NOT NULL DEFAULT '{ }', FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE CASCADE)''')
+            conn.execute('''CREATE TABLE decisions (id TEXT PRIMARY KEY, thesis_id TEXT NOT NULL, run_id TEXT NOT NULL, outcome TEXT NOT NULL, side TEXT, target_weight_bps INTEGER, current_weight_bps INTEGER, rationale TEXT NOT NULL, evidence_ids TEXT NOT NULL DEFAULT '[]', model_provider TEXT NOT NULL, model_name TEXT NOT NULL, execution_mode TEXT NOT NULL, decided_at TEXT NOT NULL, error TEXT, metadata TEXT NOT NULL DEFAULT '{ }', FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE CASCADE, FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE)''')
+            conn.execute('''CREATE TABLE agent_runs (id TEXT PRIMARY KEY, started_at TEXT NOT NULL, completed_at TEXT, status TEXT NOT NULL, execution_mode TEXT NOT NULL, schedule_id TEXT, thesis_ids TEXT NOT NULL DEFAULT '[]', decision_ids TEXT NOT NULL DEFAULT '[]', order_ids TEXT NOT NULL DEFAULT '[]', error TEXT, metadata TEXT NOT NULL DEFAULT '{ }')''')
+            conn.execute('''CREATE TABLE orders (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, decision_id TEXT NOT NULL, asset_id TEXT NOT NULL, side TEXT NOT NULL, order_type TEXT NOT NULL, quantity TEXT NOT NULL, price TEXT, status TEXT NOT NULL, broker_order_id TEXT, submitted_at TEXT, acknowledged_at TEXT, filled_at TEXT, filled_quantity TEXT NOT NULL DEFAULT '0', filled_price TEXT, commission TEXT NOT NULL DEFAULT '0', tax TEXT NOT NULL DEFAULT '0', error TEXT, metadata TEXT NOT NULL DEFAULT '{ }', FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE, FOREIGN KEY (decision_id) REFERENCES decisions(id) ON DELETE CASCADE)''')
+            conn.execute('''CREATE TABLE handoffs (id TEXT PRIMARY KEY, from_run_id TEXT NOT NULL, to_run_id TEXT NOT NULL, thesis_id TEXT NOT NULL, previous_decision_id TEXT NOT NULL, previous_outcome TEXT NOT NULL, new_outcome TEXT NOT NULL, changed INTEGER NOT NULL, change_reason TEXT NOT NULL, model_provider_from TEXT NOT NULL, model_provider_to TEXT NOT NULL, model_name_from TEXT NOT NULL, model_name_to TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY (from_run_id) REFERENCES agent_runs(id) ON DELETE CASCADE, FOREIGN KEY (to_run_id) REFERENCES agent_runs(id) ON DELETE CASCADE, FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE CASCADE, FOREIGN KEY (previous_decision_id) REFERENCES decisions(id) ON DELETE CASCADE)''')
+            conn.execute('''CREATE TABLE equity_snapshots (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, timestamp TEXT NOT NULL, total_equity TEXT NOT NULL DEFAULT '0', cash_balance TEXT NOT NULL DEFAULT '0', positions TEXT NOT NULL DEFAULT '{ }', unrealized_pnl TEXT NOT NULL DEFAULT '0', realized_pnl TEXT NOT NULL DEFAULT '0', metadata TEXT NOT NULL DEFAULT '{ }', FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE)''')
+            conn.execute('''CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))''')
+            conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_migrate_legacy_db_preserves_data_and_changes_fk_to_restrict(self):
+        """구버전 DB 마이그레이션: 데이터 보존 + FK가 RESTRICT로 변경."""
+        # 1. 구버전 DB(CASCADE FK) 생성
+        self._create_legacy_db_with_cascade_fk()
+
+        # 2. 테스트 데이터 삽입
+        import sqlite3
+        from uuid import uuid4
+        from datetime import datetime
+        from decimal import Decimal
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            thesis_id = str(uuid4())
+            run_id = str(uuid4())
+            decision_id = str(uuid4())
+            evidence_id = str(uuid4())
+            order_id = str(uuid4())
+            handoff_id = str(uuid4())
+            snapshot_id = str(uuid4())
+
+            now = datetime.utcnow().isoformat()
+
+            # 가설
+            conn.execute(
+                "INSERT INTO theses (id, asset_id, hypothesis, rationale, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (thesis_id, "KRX:005930", "Test hypothesis", "Test rationale", now, now),
+            )
+            # 실행
+            conn.execute(
+                "INSERT INTO agent_runs (id, started_at, status, execution_mode) VALUES (?, ?, ?, ?)",
+                (run_id, now, "COMPLETED", "OFFLINE_SIM"),
+            )
+            # 판단
+            conn.execute(
+                "INSERT INTO decisions (id, thesis_id, run_id, outcome, rationale, model_provider, model_name, execution_mode, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (decision_id, thesis_id, run_id, "TRADE", "Test rationale", "nvidia", "nemotron", "OFFLINE_SIM", now),
+            )
+            # 증거
+            conn.execute(
+                "INSERT INTO evidence (id, thesis_id, evidence_type, source, observed_at, collected_at, content) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (evidence_id, thesis_id, "PRICE", "test", now, now, '{"price": 70000}'),
+            )
+            # 주문
+            cursor = conn.execute(
+                "INSERT INTO orders (id, run_id, decision_id, asset_id, side, order_type, quantity, price, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (order_id, run_id, decision_id, "KRX:005930", "BUY", "LIMIT", "10", "70000", "ACKNOWLEDGED"),
+            )
+            print(f'DEBUG: orders rowcount = {cursor.rowcount}')
+            # 인계
+            cursor = conn.execute(
+                "INSERT INTO handoffs (id, from_run_id, to_run_id, thesis_id, previous_decision_id, previous_outcome, new_outcome, changed, change_reason, model_provider_from, model_provider_to, model_name_from, model_name_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (handoff_id, run_id, run_id, thesis_id, decision_id, "NO_TRADE", "TRADE", 1, "test", "fake", "nvidia", "model1", "model2", now),
+            )
+            print(f'DEBUG: handoffs rowcount = {cursor.rowcount}')
+            # 스냅샷
+            conn.execute(
+                "INSERT INTO equity_snapshots (id, run_id, timestamp, total_equity, cash_balance) VALUES (?, ?, ?, ?, ?)",
+                (snapshot_id, run_id, now, "100000000", "50000000"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # 3. 마이그레이션 실행
+        from invest_agent.storage.schema import migrate, get_schema_version
+        migrate(self.db_path)
+
+        # 4. 스키마 버전이 2로 업데이트되었는지 확인
+        version = get_schema_version(self.db_path)
+        assert version == 2
+
+        # 5. FK가 RESTRICT로 변경되었는지 검증 (PRAGMA foreign_key_list)
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            tables_with_fk = [
+                ("evidence", "thesis_id"),
+                ("decisions", "thesis_id"),
+                ("decisions", "run_id"),
+                ("orders", "run_id"),
+                ("orders", "decision_id"),
+                ("handoffs", "from_run_id"),
+                ("handoffs", "to_run_id"),
+                ("handoffs", "thesis_id"),
+                ("handoffs", "previous_decision_id"),
+                ("equity_snapshots", "run_id"),
+            ]
+            for table, fk_col in tables_with_fk:
+                fk_list = conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+                # 각 FK에 대해 ON DELETE RESTRICT 확인
+                for fk in fk_list:
+                    # fk 튜플: (id, seq, table, from, to, on_update, on_delete, match)
+                    on_delete = fk[6]
+                    assert on_delete == "RESTRICT", f"Table {table} FK {fk_col} should be RESTRICT, got {on_delete}"
+        finally:
+            conn.close()
+
+        # 6. 데이터가 보존되었는지 검증
+        from invest_agent.storage.repositories import (
+            ThesisRepository, EvidenceRepository, DecisionRepository,
+            AgentRunRepository, OrderRepository, HandoffRepository,
+            EquitySnapshotRepository
+        )
+        thesis_repo = ThesisRepository(self.db_path)
+        evidence_repo = EvidenceRepository(self.db_path)
+        decision_repo = DecisionRepository(self.db_path)
+        run_repo = AgentRunRepository(self.db_path)
+        order_repo = OrderRepository(self.db_path)
+        handoff_repo = HandoffRepository(self.db_path)
+        snapshot_repo = EquitySnapshotRepository(self.db_path)
+
+        assert thesis_repo.get(thesis_id) is not None
+        assert evidence_repo.get(evidence_id) is not None
+        assert decision_repo.get(decision_id) is not None
+        assert run_repo.get(run_id) is not None
+        assert order_repo.get(order_id) is not None
+        assert handoff_repo.get(handoff_id) is not None
+        assert snapshot_repo.get(snapshot_id) is not None
+
+        # 7. 삭제 제한 검증: 자식이 있는 부모 삭제 시 IntegrityError 발생
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            # 가설 삭제 시도 (증거가 있으므로 실패해야 함)
+            conn.execute("DELETE FROM theses WHERE id = ?", (thesis_id,))
+            conn.commit()
+            assert False, "Should have raised IntegrityError due to RESTRICT FK"
+        except sqlite3.IntegrityError:
+            pass  # Expected
+        finally:
+            conn.close()
+
+        # 8. 자식이 없는 부모는 삭제 가능해야 함
+        # 새로운 가설 생성 (자식 없음)
+        new_thesis_id = str(uuid4())
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            conn.execute(
+                "INSERT INTO theses (id, asset_id, hypothesis, rationale, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (new_thesis_id, "US:AAPL", "New hypothesis", "New rationale", now, now),
+            )
+            conn.commit()
+            # 자식 없으므로 삭제 가능
+            conn.execute("DELETE FROM theses WHERE id = ?", (new_thesis_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        # 삭제되었는지 확인
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            row = conn.execute("SELECT id FROM theses WHERE id = ?", (new_thesis_id,)).fetchone()
+            assert row is None
+        finally:
+            conn.close()
 

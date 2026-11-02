@@ -211,10 +211,25 @@ class DecisionRepository:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO decisions
+                INSERT INTO decisions
                 (id, thesis_id, run_id, outcome, side, target_weight_bps, current_weight_bps,
                  rationale, evidence_ids, model_provider, model_name, execution_mode, decided_at, error, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    thesis_id=excluded.thesis_id,
+                    run_id=excluded.run_id,
+                    outcome=excluded.outcome,
+                    side=excluded.side,
+                    target_weight_bps=excluded.target_weight_bps,
+                    current_weight_bps=excluded.current_weight_bps,
+                    rationale=excluded.rationale,
+                    evidence_ids=excluded.evidence_ids,
+                    model_provider=excluded.model_provider,
+                    model_name=excluded.model_name,
+                    execution_mode=excluded.execution_mode,
+                    decided_at=excluded.decided_at,
+                    error=excluded.error,
+                    metadata=excluded.metadata
                 """,
                 (
                     str(decision.id),

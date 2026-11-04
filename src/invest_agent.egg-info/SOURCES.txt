@@ -1,5 +1,7 @@
 README.md
 pyproject.toml
+schemas/context_envelope.schema.json
+schemas/decision_proposal.schema.json
 src/invest_agent/__init__.py
 src/invest_agent/settings.py
 src/invest_agent.egg-info/PKG-INFO
@@ -7,4 +9,13 @@ src/invest_agent.egg-info/SOURCES.txt
 src/invest_agent.egg-info/dependency_links.txt
 src/invest_agent.egg-info/requires.txt
 src/invest_agent.egg-info/top_level.txt
+src/invest_agent/domain/contracts.py
 src/invest_agent/domain/enums.py
+src/invest_agent/domain/errors.py
+src/invest_agent/domain/models.py
+src/invest_agent/migrations/001_init.sql
+src/invest_agent/migrations/002_ai_state.sql
+src/invest_agent/storage/contract_store.py
+src/invest_agent/storage/legacy_reader.py
+src/invest_agent/storage/repositories.py
+src/invest_agent/storage/schema.py

@@ -1,0 +1,2 @@
+CREATE TABLE strategy_state (version INTEGER PRIMARY KEY CHECK(version >= 0), created_at TEXT NOT NULL, active_thesis_ids_json TEXT NOT NULL, hypothesis_digest TEXT NOT NULL, last_run_id TEXT REFERENCES agent_runs(run_id));
+CREATE TABLE handoffs (snapshot_id TEXT PRIMARY KEY, state_version INTEGER NOT NULL REFERENCES strategy_state(version), provider TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES agent_runs(run_id), context_json TEXT NOT NULL, checksum TEXT NOT NULL);

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # .env 파일을 os.environ에 로드 (모델 밸리데이터에서 사용 가능하도록)
@@ -48,10 +48,22 @@ class CapitalConfig(BaseModel):
     max_daily_loss: int | None = Field(default=None, ge=0)
     max_portfolio_exposure: int | None = Field(default=None, ge=0)
 
+    @model_validator(mode="after")
+    def _enforce_cash_only(self) -> CapitalConfig:
+        if not self.cash_only or any((self.allow_margin, self.allow_credit, self.allow_short, self.allow_loans)):
+            raise ValueError("cash_only 필수, 신용·미수·공매도·차입 금지")
+        return self
+
 
 class UniverseConfig(BaseModel):
     allowed_assets: list[str] = Field(default_factory=list)
     ai_may_auto_add_to_allowlist: bool = False
+
+    @model_validator(mode="after")
+    def _forbid_auto_allowlist(self) -> UniverseConfig:
+        if self.ai_may_auto_add_to_allowlist:
+            raise ValueError("AI의 허용 목록 자동 변경 금지")
+        return self
 
 
 class SchedulerConfig(BaseModel):
@@ -281,18 +293,17 @@ class Settings(BaseSettings):
                 raise ValueError("KIS_PAPER 모드에서는 allow_live_orders=false 여야 함")
 
         if exec_mode in (ExecutionMode.OFFLINE_SIM, ExecutionMode.BACKTEST):
-            if broker_env not in (BrokerEnvironment.MOCK, BrokerEnvironment.PAPER):
+            if broker_env != BrokerEnvironment.MOCK:
                 raise ValueError(
-                    f"{exec_mode} 모드에서는 broker.environment가 MOCK 또는 PAPER여야 함 (현재: {broker_env})"
+                    f"{exec_mode} 모드에서는 broker.environment가 MOCK이어야 함 (현재: {broker_env})"
                 )
             if allow_live:
                 raise ValueError(f"{exec_mode} 모드에서는 allow_live_orders=false 여야 함")
 
-        if exec_mode != ExecutionMode.LIVE and not kill_switch:
-            raise ValueError("LIVE 모드가 아니면 kill_switch=true여야 함 (안전 기본값)")
-
-        if self.scheduler.enabled and exec_mode in (ExecutionMode.BACKTEST, ExecutionMode.OFFLINE_SIM):
-            raise ValueError(f"{exec_mode} 모드에서는 scheduler.enabled=false여야 함")
+        if self.asset_types.DERIVATIVE:
+            raise ValueError("파생상품은 초기 범위 밖")
+        if self.scheduler.overlap_policy != "SKIP" or self.scheduler.catch_up_missed_runs:
+            raise ValueError("중복 실행 및 누락 실행 재시도 금지")
 
         return self
 

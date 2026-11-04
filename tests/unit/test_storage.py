@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import closing
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -247,9 +248,10 @@ class TestDecisionRepository:
 
     def test_upsert_preserves_orders(self):
         """판단 업서트 시 연결된 주문이 유지되는지 검증."""
-        from invest_agent.storage.repositories import OrderRepository
-        from invest_agent.domain.models import OrderRecord, OrderSide, OrderStatus
         from decimal import Decimal
+
+        from invest_agent.domain.models import OrderRecord, OrderSide, OrderStatus
+        from invest_agent.storage.repositories import OrderRepository
 
         # 판단 생성 및 저장
         decision = Decision(
@@ -676,6 +678,28 @@ class TestSchemaAndMigration:
         version = get_schema_version(self.db_path)
         assert version == 2
 
+    def test_init_rejects_existing_db_without_changing_version(self):
+        import sqlite3
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT)")
+            conn.execute("INSERT INTO schema_version VALUES (1, 'old')")
+            conn.commit()
+        with pytest.raises(sqlite3.DatabaseError, match="기존 DB"):
+            init_db(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            assert conn.execute("SELECT * FROM schema_version").fetchall() == [(1, "old")]
+
+    def test_future_version_is_rejected(self):
+        import sqlite3
+
+        init_db(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("INSERT INTO schema_version VALUES (99, 'future')")
+            conn.commit()
+        with pytest.raises(ValueError, match="기존 스키마 버전"):
+            migrate(self.db_path)
+
     def test_wal_mode_enabled(self):
         init_db(self.db_path)
         import sqlite3
@@ -898,13 +922,170 @@ class TestMigrationFromLegacy:
     """기존 DB(CASCADE FK)에서 신규 DB(RESTRICT FK)로 마이그레이션 테스트."""
 
     def setup_method(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp = tempfile.TemporaryDirectory()
+        self.temp_dir = self.temp.name
         self.db_path = Path(self.temp_dir) / "test.db"
 
     def teardown_method(self):
-        if self.db_path.exists():
-            self.db_path.unlink()
-        os.rmdir(self.temp_dir)
+        self.temp.cleanup()
+
+    def test_backup_contains_wal_and_is_readable(self):
+        import sqlite3
+
+        self._create_legacy_db_with_cascade_fk()
+        with closing(sqlite3.connect(self.db_path)) as writer:
+            writer.execute("PRAGMA wal_autocheckpoint = 0")
+            writer.execute(
+                "INSERT INTO theses (id, asset_id, hypothesis, rationale, created_at, updated_at) "
+                "VALUES ('wal', 'asset', 'hypothesis', 'rationale', 'time', 'time')"
+            )
+            writer.commit()
+            migrate(self.db_path)
+            backup_path = next(self.db_path.parent.glob("*.bak.*"))
+            with closing(sqlite3.connect(backup_path)) as backup:
+                assert backup.execute("SELECT id FROM theses").fetchall() == [("wal",)]
+                assert backup.execute("SELECT MAX(version) FROM schema_version").fetchone() == (1,)
+                assert backup.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+    def test_failure_rolls_back_schema_and_data(self, monkeypatch):
+        import sqlite3
+
+        from invest_agent.storage import schema
+
+        self._create_legacy_db_with_cascade_fk()
+        original = schema._migrate_v1_to_v2
+
+        def fail_after_rebuild(conn):
+            original(conn)
+            raise RuntimeError("injected failure")
+
+        monkeypatch.setattr(schema, "_migrate_v1_to_v2", fail_after_rebuild)
+        with pytest.raises(RuntimeError, match="injected failure"):
+            migrate(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone() == (1,)
+            assert conn.execute("PRAGMA foreign_key_list(orders)").fetchone()[6] == "CASCADE"
+            assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    def test_concurrent_write_after_backup_aborts(self, monkeypatch):
+        import sqlite3
+
+        from invest_agent.storage import schema
+
+        self._create_legacy_db_with_cascade_fk()
+        original = schema._backup_db
+
+        def backup_then_write(conn, path):
+            result = original(conn, path)
+            with closing(sqlite3.connect(path)) as other:
+                other.execute(
+                    "INSERT INTO theses (id, asset_id, hypothesis, rationale, created_at, updated_at) "
+                    "VALUES ('concurrent', 'asset', 'h', 'r', 'time', 'time')"
+                )
+                other.commit()
+            return result
+
+        monkeypatch.setattr(schema, "_backup_db", backup_then_write)
+        with pytest.raises(sqlite3.OperationalError, match="DB가 변경됨"):
+            migrate(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone() == (1,)
+            assert conn.execute("SELECT id FROM theses").fetchall() == [("concurrent",)]
+
+    def test_concurrent_writer_is_blocked_during_rebuild(self, monkeypatch):
+        import sqlite3
+
+        from invest_agent.storage import schema
+
+        self._create_legacy_db_with_cascade_fk()
+        original = schema._migrate_v1_to_v2
+
+        def attempt_write_during_rebuild(conn):
+            with closing(sqlite3.connect(self.db_path, timeout=0)) as other:
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    other.execute("INSERT INTO agent_runs (id, started_at, status, execution_mode) VALUES ('other', 't', 'CREATED', 'OFFLINE_SIM')")
+            original(conn)
+
+        monkeypatch.setattr(schema, "_migrate_v1_to_v2", attempt_write_during_rebuild)
+        migrate(self.db_path)
+        assert get_schema_version(self.db_path) == 2
+
+    def test_invalid_foreign_key_in_backup_prevents_migration(self):
+        import sqlite3
+
+        self._create_legacy_db_with_cascade_fk()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("INSERT INTO evidence (id, thesis_id, evidence_type, source, observed_at, collected_at) VALUES ('orphan', 'missing', 'PRICE', 'fixture', 't', 't')")
+            conn.commit()
+        with pytest.raises(sqlite3.IntegrityError, match="백업 DB"):
+            migrate(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone() == (1,)
+            assert conn.execute("SELECT id FROM evidence").fetchall() == [("orphan",)]
+
+    def test_existing_backup_name_is_never_overwritten(self, monkeypatch):
+        import sqlite3
+        from datetime import UTC
+
+        from invest_agent.storage import schema
+
+        self._create_legacy_db_with_cascade_fk()
+        fixed_time = datetime(2026, 1, 1, tzinfo=UTC)
+
+        class FixedDatetime:
+            @staticmethod
+            def now(_timezone):
+                return fixed_time
+
+        monkeypatch.setattr(schema, "datetime", FixedDatetime)
+        backup_path = self.db_path.with_suffix(".bak.20260101_000000_000000")
+        backup_path.write_bytes(b"existing backup")
+        with pytest.raises(FileExistsError):
+            migrate(self.db_path)
+        assert backup_path.read_bytes() == b"existing backup"
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone() == (1,)
+
+    def test_ensure_db_refuses_automatic_legacy_migration(self):
+        import sqlite3
+
+        self._create_legacy_db_with_cascade_fk()
+        before = self.db_path.read_bytes()
+        with pytest.raises(sqlite3.DatabaseError, match="자동 변환 금지"):
+            ensure_db(self.db_path)
+        assert self.db_path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "ddl",
+        [
+            "CREATE TABLE orders_v2 (id TEXT)",
+            "ALTER TABLE orders ADD COLUMN unknown_field TEXT",
+            "CREATE INDEX custom_order_status ON orders(status)",
+            "CREATE TRIGGER custom_order_trigger AFTER INSERT ON orders BEGIN SELECT 1; END",
+            "CREATE TABLE external_orders (order_id TEXT REFERENCES orders(id))",
+        ],
+    )
+    def test_unrecognised_schema_aborts_without_modification(self, ddl):
+        import sqlite3
+
+        self._create_legacy_db_with_cascade_fk()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(ddl)
+            conn.commit()
+            before = conn.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+            ).fetchall()
+        with pytest.raises(sqlite3.DatabaseError):
+            migrate(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            after = conn.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+            ).fetchall()
+            assert after == before
+            assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone() == (1,)
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
     def _create_legacy_db_with_cascade_fk(self):
         """구버전 스키마(CASCADE FK)로 DB 생성."""
@@ -933,9 +1114,8 @@ class TestMigrationFromLegacy:
 
         # 2. 테스트 데이터 삽입
         import sqlite3
-        from uuid import uuid4
         from datetime import datetime
-        from decimal import Decimal
+        from uuid import uuid4
         conn = sqlite3.connect(str(self.db_path))
         conn.execute("PRAGMA foreign_keys = ON")
         try:
@@ -987,11 +1167,12 @@ class TestMigrationFromLegacy:
                 (snapshot_id, run_id, now, "100000000", "50000000"),
             )
             conn.commit()
+            tables = ("theses", "agent_runs", "decisions", "evidence", "orders", "handoffs", "equity_snapshots")
+            before = {table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
         finally:
             conn.close()
 
         # 3. 마이그레이션 실행
-        from invest_agent.storage.schema import migrate, get_schema_version
         migrate(self.db_path)
 
         # 4. 스키마 버전이 2로 업데이트되었는지 확인
@@ -1001,6 +1182,9 @@ class TestMigrationFromLegacy:
         # 5. FK가 RESTRICT로 변경되었는지 검증 (PRAGMA foreign_key_list)
         conn = sqlite3.connect(str(self.db_path))
         try:
+            for table in tables:
+                assert conn.execute(f"SELECT * FROM {table}").fetchall() == before[table]
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
             tables_with_fk = [
                 ("evidence", "thesis_id"),
                 ("decisions", "thesis_id"),
@@ -1023,12 +1207,17 @@ class TestMigrationFromLegacy:
         finally:
             conn.close()
 
+        backup_path = next(self.db_path.parent.glob("*.bak.*"))
+        restore_path = self.db_path.parent / "restored.db"
+        with closing(sqlite3.connect(backup_path)) as backup, closing(sqlite3.connect(restore_path)) as restored:
+            backup.backup(restored)
+            for table in tables:
+                assert restored.execute(f"SELECT * FROM {table}").fetchall() == before[table]
+            assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            assert restored.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert restored.execute("SELECT MAX(version) FROM schema_version").fetchone() == (1,)
+
         # 6. 데이터가 보존되었는지 검증
-        from invest_agent.storage.repositories import (
-            ThesisRepository, EvidenceRepository, DecisionRepository,
-            AgentRunRepository, OrderRepository, HandoffRepository,
-            EquitySnapshotRepository
-        )
         thesis_repo = ThesisRepository(self.db_path)
         evidence_repo = EvidenceRepository(self.db_path)
         decision_repo = DecisionRepository(self.db_path)

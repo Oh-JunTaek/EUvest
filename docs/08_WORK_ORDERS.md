@@ -15,6 +15,8 @@
 ## P0-03 — 도메인 모델 / SQLite 마이그레이션
 **수정**: `domain/models.py`, `domain/errors.py`, `storage/db.py`, `storage/repositories.py`, `migrations/001_init.sql`, `002_ai_state.sql`, `tests/unit/test_storage.py`. **작업**: Decimal, UTC, asset identity, state_version 낙관적 잠금, 감사 로그, WAL, 원자적 주문 intent 저장. **완료**: 저장·재시작·중복키 방지·DB 충돌 처리. **테스트**: T-018, 025, 035, 039.
 
+P0-03 저장 계층은 완료했다. 사용자가 승인한 통합 검증 이월과 미검증 경계는 `11_OPEN_DECISIONS.md`의 P03-ACCEPT-01, 세부 결과는 `P03_FINAL_2026-11-04.md`를 참조한다. T-018·T-035의 실행기/브로커 측 거래 차단과 T-025의 실제 주문 경계는 통과로 처리하지 않는다.
+
 ## P0-04 — KIS 읽기전용 어댑터 / MockBroker
 **수정**: `broker/protocol.py`, `broker/mock_broker.py`, `broker/kis_adapter.py`(READ만), `normalize.py`, `rate_limiter.py`, `tests/contract/test_broker.py`. **작업**: 현재가·잔고·주문내역 조회의 정규화, REST 모의/실전 호스트 분리, 429 및 토큰 수명, 요청 속도 큐. **완료**: MockBroker는 키 없어도 동작; KIS 실조회는 사용자가 키를 넣은 후 별도 READ_ONLY 증빙. **테스트**: T-013, 032, 040. **금지**: 공식 예제 `*_examples.py` 전체 실행.
 

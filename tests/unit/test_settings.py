@@ -144,26 +144,34 @@ class TestSettingsValidation:
                 broker=BrokerConfig(environment=BrokerEnvironment.MOCK),
             )
 
-    def test_offline_sim_requires_kill_switch_true(self):
-        with pytest.raises(ValueError, match="kill_switch=true"):
-            Settings(
-                execution=ExecutionConfig(mode=ExecutionMode.OFFLINE_SIM, kill_switch=False),
-                broker=BrokerConfig(environment=BrokerEnvironment.MOCK),
-            )
+    def test_offline_sim_may_explicitly_release_kill_switch(self):
+        assert Settings(execution={"kill_switch": False}).execution.kill_switch is False
 
-    def test_scheduler_disabled_in_offline_modes(self):
-        with pytest.raises(ValueError, match="scheduler.enabled=false"):
-            Settings(
-                execution=ExecutionConfig(mode=ExecutionMode.OFFLINE_SIM),
-                scheduler={"enabled": True},
-            )
+    def test_offline_rejects_paper_broker(self):
+        with pytest.raises(ValueError, match="MOCK이어야"):
+            Settings(broker={"environment": "PAPER"})
 
-    def test_scheduler_disabled_in_backtest(self):
-        with pytest.raises(ValueError, match="scheduler.enabled=false"):
-            Settings(
-                execution=ExecutionConfig(mode=ExecutionMode.BACKTEST),
-                scheduler={"enabled": True},
-            )
+    @pytest.mark.parametrize("field", ["allow_margin", "allow_credit", "allow_short", "allow_loans"])
+    def test_forbidden_capital_modes(self, field):
+        with pytest.raises(ValueError, match="금지"):
+            CapitalConfig(**{field: True})
+
+    def test_cash_only_cannot_be_disabled(self):
+        with pytest.raises(ValueError, match="cash_only"):
+            CapitalConfig(cash_only=False)
+
+    def test_universe_cannot_be_changed_by_ai(self):
+        with pytest.raises(ValueError, match="자동 변경 금지"):
+            Settings(universe={"ai_may_auto_add_to_allowlist": True})
+
+    def test_derivatives_rejected(self):
+        with pytest.raises(ValueError, match="파생상품"):
+            Settings(asset_types={"DERIVATIVE": True})
+
+    @pytest.mark.parametrize("scheduler", [{"overlap_policy": "QUEUE"}, {"catch_up_missed_runs": True}])
+    def test_schedule_cannot_queue_or_catch_up(self, scheduler):
+        with pytest.raises(ValueError, match="재시도 금지"):
+            Settings(scheduler=scheduler)
 
     def test_kis_paper_allows_scheduler(self):
         s = Settings(
@@ -200,13 +208,15 @@ class TestLoadSettings:
             load_settings("nonexistent.yaml")
 
 class TestSettingsSingleton:
-    def test_get_settings_returns_instance(self):
+    def test_get_settings_returns_instance(self, monkeypatch):
+        monkeypatch.setattr("invest_agent.settings.load_settings", lambda: Settings(_env_file=None))
         reset_settings()
         s = get_settings()
         assert isinstance(s, Settings)
         assert get_settings() is s
 
-    def test_reset_settings(self):
+    def test_reset_settings(self, monkeypatch):
+        monkeypatch.setattr("invest_agent.settings.load_settings", lambda: Settings(_env_file=None))
         reset_settings()
         assert get_settings() is not None
         reset_settings()

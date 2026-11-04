@@ -1,5 +1,9 @@
 # KIS API 검증 로그 (API_VERIFICATION_LOG.md)
 
+> **2026-11-04 재점검:** 아래 2026-10-31 매트릭스의 TR_ID·호스트·유량·상품별 지원은 이전 조사 기록이며 현재 값을 재검증한 결과가 아니다. 고정 커밋 `3a9be59`의 각 파일을 이번 점검에서 열지 못했으므로 코드 구현 근거로 재사용하기 전 해당 버전과 최신 공식 문서를 다시 대조한다. 실제 API 인증 및 주문은 NOT_TESTED.
+>
+> 공식 [국내 현금주문 예제](https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/domestic_stock/order_cash/order_cash.py)는 계좌 조건에 따라 미수매수가 가능하다고 경고한다. 따라서 API 이름만으로 현금 전용이 보장되지 않는다. 실주문 전 계좌 설정과 미수 없는 매수 가능 금액·수량 등 공식 근거 및 강제 검증이 필요하며 확인 전 차단한다. 예제와 실제 계좌 지원 여부는 별개다.
+
 > **작성일**: 2026-10-31  
 > **기준 저장소**: https://github.com/koreainvestment/open-trading-api  
 > **커밋 해시**: `3a9be59` (2026-10-27, "fix: 토큰 관리 및 OS 간 호환성 오류 수정")  
@@ -110,7 +114,7 @@
 1. **KIS 모의계좌 키 발급** → `VERIFIED_READ` 전환 (조회 API 테스트)
 2. **MockBroker로 오프라인 테스트 완료** → `OFFLINE_SIM` 검증
 3. **KIS_PAPER 모의 주문 테스트** → `VERIFIED_PAPER` 전환 (지원 상품별 개별 확인)
-4. **실거래 승인 전** → `VERIFIED_LIVE` 전환 (소액 1건 테스트)
+4. **사용자 실거래 승인과 모든 LIVE 게이트 충족 후에만** 별도 승인된 소액 테스트를 검토한다. 실제 체결 증빙 전 `VERIFIED_LIVE` 금지.
 
 ---
 

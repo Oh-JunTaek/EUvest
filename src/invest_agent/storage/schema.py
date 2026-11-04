@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import shutil
+import os
 import sqlite3
-from datetime import datetime
+from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA_VERSION = 2
@@ -164,11 +165,6 @@ DDL_STATEMENTS = [
     """,
 ]
 
-INITIAL_VERSION_DDL = f"""
-INSERT OR IGNORE INTO schema_version (version) VALUES ({SCHEMA_VERSION})
-"""
-
-
 def get_connection(db_path: str | Path) -> sqlite3.Connection:
     """SQLite 연결 생성 (외래키 활성화, WAL 모드)."""
     conn = sqlite3.connect(str(db_path))
@@ -182,10 +178,19 @@ def init_db(db_path: str | Path) -> None:
     """데이터베이스 초기화 (스키마 생성 + 버전 기록)."""
     conn = get_connection(db_path)
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone():
+            raise sqlite3.DatabaseError("기존 DB는 초기화할 수 없습니다")
         for ddl in DDL_STATEMENTS:
             conn.execute(ddl)
-        conn.execute(INITIAL_VERSION_DDL)
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (SCHEMA_VERSION, datetime.now(UTC).isoformat()),
+        )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -200,10 +205,18 @@ def get_schema_version(db_path: str | Path) -> int:
         conn.close()
 
 
-def _backup_db(db_path: Path) -> Path:
+def _backup_db(conn: sqlite3.Connection, db_path: Path) -> Path:
     """마이그레이션 전 백업 생성."""
-    backup_path = db_path.with_suffix(f".bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-    shutil.copy2(db_path, backup_path)
+    stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+    backup_path = db_path.with_suffix(f".bak.{stamp}")
+    fd = os.open(backup_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    with closing(sqlite3.connect(str(backup_path))) as backup:
+        conn.backup(backup)
+        if backup.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise sqlite3.DatabaseError("백업 DB 무결성 검사 실패")
+        if backup.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise sqlite3.IntegrityError("백업 DB 외래키 무결성 검사 실패")
     return backup_path
 
 
@@ -211,23 +224,59 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     """v1(CASCADE FK) -> v2(RESTRICT FK) 마이그레이션.
 
     SQLite는 FK 변경 시 테이블 재생성이 필요하므로:
-    1. 새 테이블(_v2) 생성 (RESTRICT FK) - DDL_STATEMENTS의 스키마 사용
-    2. 데이터 복사
+    1. 모든 새 테이블(_v2) 생성 (RESTRICT FK) - DDL_STATEMENTS의 스키마 사용
+    2. 모든 데이터 복사
     3. 기존 테이블 삭제
     4. 새 테이블 이름 변경
     """
-    # FK가 있는 테이블들 (마이그레이션 순서 중요: 부모 테이블 먼저)
+    # FK가 있는 테이블들 (마이그레이션 순서 중요: 자식 테이블 먼저 - CASCADE 삭제 방지)
+    # 1. orders (자식: agent_runs, decisions 참조)
+    # 2. handoffs (자식: agent_runs, theses, decisions 참조)
+    # 3. evidence (자식: theses 참조)
+    # 4. equity_snapshots (자식: agent_runs 참조)
+    # 5. decisions (부모: orders, handoffs 참조 / 자식: theses, agent_runs 참조)
     tables_with_fk = [
-        "evidence",
-        "decisions",
         "orders",
         "handoffs",
+        "evidence",
         "equity_snapshots",
+        "decisions",
     ]
 
-    # 각 테이블별로 재생성
+    index_names = {
+        ddl.split()[5]
+        for ddl in DDL_STATEMENTS
+        if ddl.strip().upper().startswith("CREATE INDEX IF NOT EXISTS")
+    }
     for table in tables_with_fk:
-        # 임시 테이블명
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = ?", (f"{table}_v2",)
+        ).fetchone():
+            raise sqlite3.DatabaseError(f"임시 테이블 이름이 이미 존재함: {table}_v2")
+        dependent = conn.execute(
+            "SELECT type, name FROM sqlite_master "
+            "WHERE tbl_name = ? AND (type = 'trigger' OR (type = 'index' AND sql IS NOT NULL))",
+            (table,),
+        ).fetchall()
+        for object_type, name in dependent:
+            if object_type == "trigger" or name not in index_names:
+                raise sqlite3.DatabaseError(f"보존할 사용자 정의 객체가 있음: {name}")
+        if any(row[3] == "u" for row in conn.execute(f"PRAGMA index_list({table})")):
+            raise sqlite3.DatabaseError(f"추가 UNIQUE 제약을 자동 변환할 수 없음: {table}")
+
+    existing_tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    for (table,) in existing_tables:
+        if table in tables_with_fk:
+            continue
+        references = conn.execute('SELECT "table" FROM pragma_foreign_key_list(?)', (table,))
+        if any(row[0] in tables_with_fk for row in references):
+            raise sqlite3.DatabaseError(f"마이그레이션 대상에 대한 외부 참조가 있음: {table}")
+
+    # 1단계: 모든 새 테이블(_v2) 생성
+    new_tables = {}
+    for table in tables_with_fk:
         new_table = f"{table}_v2"
 
         # 기존 테이블 존재 확인
@@ -236,13 +285,11 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         ).fetchone()
 
         if not exists:
-            print(f"Table {table} does not exist, skipping")
-            continue
+            raise sqlite3.DatabaseError(f"마이그레이션 대상 테이블 없음: {table}")
 
-        print(f"Migrating table: {table}")
+        print(f"Creating {new_table}...")
 
         # 새 테이블 생성 (DDL_STATEMENTS에서 해당 테이블의 CREATE 문 사용)
-        # DDL_STATEMENTS에서 테이블 생성문 찾기
         create_ddl = None
         for ddl in DDL_STATEMENTS:
             if ddl.strip().upper().startswith("CREATE TABLE") and f"{table} (" in ddl:
@@ -250,87 +297,111 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
                 break
 
         if not create_ddl:
-            print(f"No CREATE DDL found for {table}")
-            continue
-
-        print(f"Found DDL for {table}: {create_ddl[:100]}")
+            raise sqlite3.DatabaseError(f"스키마 정의 없음: {table}")
 
         # 테이블명 변경하여 새 테이블 생성
         new_sql = create_ddl.replace(f"CREATE TABLE {table}", f"CREATE TABLE {new_table}")
         new_sql = new_sql.replace(f"CREATE TABLE IF NOT EXISTS {table}", f"CREATE TABLE IF NOT EXISTS {new_table}")
 
-        print(f"Creating {new_table}...")
         conn.execute(new_sql)
+        source_columns = [
+            (row[1], row[2].upper(), row[3], row[5])
+            for row in conn.execute(f"PRAGMA table_info({table})")
+        ]
+        target_columns = [
+            (row[1], row[2].upper(), row[3], row[5])
+            for row in conn.execute(f"PRAGMA table_info({new_table})")
+        ]
+        if source_columns != target_columns:
+            raise sqlite3.DatabaseError(f"마이그레이션 열 구성 또는 순서 불일치: {table}")
+        new_tables[table] = new_table
 
-        # 데이터 복사 전 소스 테이블 확인
+    # 2단계: 모든 데이터 복사 (자식 -> 부모 순서로 복사)
+    for table in tables_with_fk:
+        if table not in new_tables:
+            continue
+        new_table = new_tables[table]
+
+        print(f"Migrating table: {table}")
         src_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         print(f"Source {table} has {src_count} rows")
 
-        # 데이터 복사
         print(f"Copying data from {table} to {new_table}...")
         conn.execute(f"INSERT INTO {new_table} SELECT * FROM {table}")
 
-        # 복사된 데이터 확인
         count = conn.execute(f"SELECT COUNT(*) FROM {new_table}").fetchone()[0]
         print(f"Copied {count} rows to {new_table}")
 
-        # 기존 테이블 삭제
+        if count != src_count:
+            raise RuntimeError(f"데이터 복사 실패: {table} 원본 {src_count}건, 복사본 {count}건")
+
+    # 3단계: 기존 테이블 삭제
+    for table in tables_with_fk:
+        if table not in new_tables:
+            continue
         conn.execute(f"DROP TABLE {table}")
         print(f"Dropped {table}")
 
-        # 새 테이블 이름 변경
+    # 4단계: 새 테이블 이름 변경
+    for table in tables_with_fk:
+        if table not in new_tables:
+            continue
+        new_table = new_tables[table]
         conn.execute(f"ALTER TABLE {new_table} RENAME TO {table}")
         print(f"Renamed {new_table} to {table}")
 
-        # 인덱스 재생성 (인덱스는 DROP TABLE 시 자동 삭제됨)
-        # 인덱스 생성문은 DDL_STATEMENTS에 있으므로 init_db 시 재생성됨
-
-    # 인덱스 재생성
+    # 인덱스 재생성 (인덱스는 DROP TABLE 시 자동 삭제됨)
     index_ddls = [ddl for ddl in DDL_STATEMENTS if ddl.strip().upper().startswith("CREATE INDEX")]
     for ddl in index_ddls:
-        try:
-            conn.execute(ddl)
-        except sqlite3.OperationalError:
-            pass  # 이미 존재할 수 있음
+        conn.execute(ddl)
 
 
 
 def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
     """마이그레이션 실행 (현재 버전 -> 타겟 버전)."""
-    current = get_schema_version(db_path)
-    if current >= target_version:
-        return
-
-    if target_version > SCHEMA_VERSION:
+    if target_version != SCHEMA_VERSION:
         raise ValueError(f"지원하지 않는 스키마 버전: {target_version} (최대: {SCHEMA_VERSION})")
 
     path = Path(db_path)
-    backup_path = _backup_db(path)
-
+    if not path.is_file():
+        raise FileNotFoundError(path)
     conn = get_connection(path)
     try:
-        # 버전별 마이그레이션
-        if current < 2 and target_version >= 2:
-            _migrate_v1_to_v2(conn)
-
-        # 버전 기록 업데이트 (최신 버전 추가)
+        current_row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        current = current_row[0]
+        if current == target_version:
+            return
+        if current != 1:
+            raise ValueError(f"지원하지 않는 기존 스키마 버전: {current}")
+        data_version = conn.execute("PRAGMA data_version").fetchone()[0]
+        _backup_db(conn, path)
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA data_version").fetchone()[0] != data_version:
+            raise sqlite3.OperationalError("백업 중 DB가 변경됨: 마이그레이션 중단")
+        if conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] != current:
+            raise sqlite3.OperationalError("스키마 버전이 변경됨: 마이그레이션 중단")
+        _migrate_v1_to_v2(conn)
         conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                     (target_version, datetime.now().isoformat()))
+                     (target_version, datetime.now(UTC).isoformat()))
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise sqlite3.IntegrityError("마이그레이션 후 외래키 무결성 검증 실패")
         conn.commit()
     except Exception:
-        # 실패 시 백업에서 복구
-        conn.close()
-        shutil.copy2(backup_path, path)
+        conn.rollback()
         raise
     finally:
         conn.close()
 
 
 def ensure_db(db_path: str | Path) -> None:
-    """DB가 없으면 초기화, 있으면 마이그레이션."""
+    """기존 호환 저장소 초기화. 과거 DB는 자동 변환하지 않는다."""
     path = Path(db_path)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         init_db(path)
     else:
-        migrate(path)
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+            row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        if row is None or row[0] != SCHEMA_VERSION:
+            raise sqlite3.DatabaseError("기존 DB 자동 변환 금지: 읽기 전용 조회를 사용하세요")

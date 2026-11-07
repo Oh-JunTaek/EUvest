@@ -32,11 +32,24 @@ class ResearchBudget:
     used_tokens: int = 0
     used_requests: int = 0
 
+    def __post_init__(self) -> None:
+        values = (self.max_tokens, self.max_requests, self.used_tokens, self.used_requests)
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError("예산과 사용량은 0 이상의 정수여야 합니다")
+        if self.used_tokens > self.max_tokens or self.used_requests > self.max_requests:
+            raise ValueError("초기 사용량이 예산을 초과했습니다")
+
     def can_request(self, estimated_tokens: int = 500) -> bool:
+        if type(estimated_tokens) is not int or estimated_tokens < 0:
+            raise ValueError("토큰 예상치는 0 이상의 정수여야 합니다")
         return (self.used_requests < self.max_requests and
                 self.used_tokens + estimated_tokens <= self.max_tokens)
 
     def consume(self, tokens: int, requests: int = 1) -> None:
+        if type(tokens) is not int or type(requests) is not int or tokens < 0 or requests < 0:
+            raise ValueError("사용량은 0 이상의 정수여야 합니다")
+        if self.used_tokens + tokens > self.max_tokens or self.used_requests + requests > self.max_requests:
+            raise ValueError("연구 예산 초과")
         self.used_tokens += tokens
         self.used_requests += requests
 
@@ -92,14 +105,16 @@ def deduplicate_evidence(
     evidence_list: list[CollectedEvidence],
     similarity_threshold: float = 0.85
 ) -> tuple[list[CollectedEvidence], int]:
-    """증거 중복 제거 (간단한 내용 기반)."""
+    """출처와 내용이 동일한 증거만 제거한다. 유사도 인수는 기존 호출 호환용이다."""
     unique = []
     removed = 0
 
     for ev in evidence_list:
         is_dup = False
         for existing in unique:
-            if _is_similar(ev.evidence.content, existing.evidence.content, similarity_threshold):
+            if (ev.source_provider == existing.source_provider
+                    and ev.evidence.raw_ref == existing.evidence.raw_ref
+                    and _is_similar(ev.evidence.content, existing.evidence.content, similarity_threshold)):
                 is_dup = True
                 ev.is_duplicate = True
                 ev.duplicate_of = existing.evidence.id
@@ -113,34 +128,14 @@ def deduplicate_evidence(
 
 
 def _is_similar(content1: dict[str, Any], content2: dict[str, Any], threshold: float) -> bool:
-    """간단한 유사도 비교 (키 + 일부 값 기반)."""
-    keys1 = set(str(k).lower() for k in content1.keys())
-    keys2 = set(str(k).lower() for k in content2.keys())
-
-    if not keys1 or not keys2:
-        return False
-
-    # 키 유사도
-    intersection = keys1 & keys2
-    union = keys1 | keys2
-    key_similarity = len(intersection) / len(union)
-
-    if key_similarity < threshold:
-        return False
-
-    # 공통 키에 대한 값 비교 (문자열인 경우)
-    for key in intersection:
-        v1 = content1.get(key)
-        v2 = content2.get(key)
-        if isinstance(v1, str) and isinstance(v2, str) and v1 != v2:
-            # 값이 다르면 중복이 아님
-            return False
-
-    return True
+    """모든 값이 같은 경우만 중복으로 취급한다."""
+    return bool(content1) and content1 == content2
 
 
-def sanitize_prompt_input(text: str, max_length: int = 10000) -> str:
-    """프롬프트 인젝션 방지를 위한 입력 정제."""
+def sanitize_prompt_input(text: str | None, max_length: int = 10000) -> str:
+    """길이와 일부 문구만 정리한다. 명령 주입 차단 보장은 아니다."""
+    if max_length < 0:
+        raise ValueError("최대 길이는 음수일 수 없습니다")
     if not text:
         return ""
 
@@ -162,12 +157,10 @@ def sanitize_prompt_input(text: str, max_length: int = 10000) -> str:
         "USER:",
     ]
 
-    text_lower = text.lower()
+    import re
+
     for pattern in dangerous_patterns:
-        if pattern.lower() in text_lower:
-            text = text.replace(pattern, "[FILTERED]")
-            text = text.replace(pattern.upper(), "[FILTERED]")
-            text = text.replace(pattern.capitalize(), "[FILTERED]")
+        text = re.sub(re.escape(pattern), "[FILTERED]", text, flags=re.IGNORECASE)
 
     # 길이 제한 (마지막에 처리)
     if len(text) > max_length:
@@ -185,8 +178,7 @@ def extract_publication_timestamp(content: dict[str, Any]) -> datetime | None:
     """공개 자료에서 발표 시각 추출."""
     timestamp_fields = [
         "published_at", "publishedAt", "pub_date", "pubDate",
-        "disclosure_date", "disclosureDate", "report_date", "reportDate",
-        "created_at", "createdAt", "timestamp", "date", "datetime"
+        "disclosure_date", "disclosureDate",
     ]
 
     for ts_field in timestamp_fields:
@@ -195,10 +187,13 @@ def extract_publication_timestamp(content: dict[str, Any]) -> datetime | None:
             if isinstance(value, str):
                 try:
                     # ISO 포맷 파싱 시도
-                    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    if parsed.utcoffset() is not None:
+                        return parsed.astimezone(UTC)
                 except ValueError:
                     pass
             elif isinstance(value, datetime):
-                return value
+                if value.utcoffset() is not None:
+                    return value.astimezone(UTC)
 
     return None

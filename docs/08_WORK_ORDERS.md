@@ -35,6 +35,8 @@ P0-03 저장 계층은 완료했다. 사용자가 승인한 통합 검증 이월
 ## P1-09 — 연구 파이프라인·공시·데이터 출처
 **수정**: `agent/research_planner.py`, `market/evidence.py`, `market/filings_dart.py`, `tests/unit/test_evidence.py`. **작업**: 기사/공시 허용 공급자 목록, 중복 제거, 공개자료에 발표시각 저장, 위험 프롬프트 인젝션, 정해진 범위 내 자율 연구 도구 요청. **완료**: 입력 토큰/요청 예산 내에서 필요한 조사만 수행하고 신규 근거 없을 때 NO_TRADE 허용. **테스트**: T-021,022,038.
 
+2026-11-07 점검 결과 Mock 기반 안전 경계는 보완했으나 실제 OpenDART 수집·발표 시각과 저장소 연결은 미완료다. P1-10의 선행 결함 및 차단 조건은 `P09_P10_READINESS_2026-11-07.md`를 따른다. 기존 완료 커밋명이나 테스트 개수만으로 실제 공급자·통합 인수를 간주하지 않는다.
+
 ## P1-10 — 완전 자동 `run-once`와 기본 CLI
 **수정**: `runtime/orchestrator.py`, `runtime/locking.py`, `cli.py`, `operations/health.py`, `reporting/daily.py`, `tests/integration/test_run_once.py`. **작업**: 조사→판단→RiskGate→Mock 실행→대사→일지, status, runs, portfolio, universe, orders, stop/recover. **완료**: `uv run invest run-once --mode offline-sim`, 중복 트리거 스킵, 실패 보고. **테스트**: I-01, I-02, I-03, I-06, I-09.
 

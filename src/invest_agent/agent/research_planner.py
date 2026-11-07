@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from invest_agent.agent.context_builder import ContextEnvelope
-from invest_agent.ai.protocol import AIRequest, AIResponse
 from invest_agent.ai.router import ProviderRouter as AIRouter
 from invest_agent.domain.models import EvidenceType, Thesis
 from invest_agent.market.evidence import (
@@ -15,7 +14,6 @@ from invest_agent.market.evidence import (
     ResearchResult,
     SourceProvider,
     deduplicate_evidence,
-    sanitize_prompt_input,
 )
 from invest_agent.market.filings_dart import (
     DartClient,
@@ -61,10 +59,6 @@ class ResearchPlanner:
     dart_client: DartClient | None = None
     default_budget: ResearchBudget = field(default_factory=lambda: ResearchBudget(max_tokens=8000, max_requests=20))
 
-    def __post_init__(self):
-        if self.dart_client is None:
-            self.dart_client = DartClient()
-
     def create_plan(
         self,
         thesis: Thesis | None = None,
@@ -74,8 +68,8 @@ class ResearchPlanner:
         required_sources: list[SourceProvider] | None = None,
         budget: ResearchBudget | None = None,
     ) -> ResearchPlan:
-        questions = custom_questions or []
-        sources = required_sources or [SourceProvider.DART, SourceProvider.FINANCIAL_STATEMENTS]
+        questions = list(custom_questions) if custom_questions is not None else []
+        sources = list(required_sources) if required_sources is not None else [SourceProvider.DART, SourceProvider.FINANCIAL_STATEMENTS]
 
         if thesis and not custom_questions:
             for ev_type in [EvidenceType.FUNDAMENTAL, EvidenceType.FILING, EvidenceType.NEWS]:
@@ -88,7 +82,9 @@ class ResearchPlanner:
             asset_id=asset_id,
             questions=questions[:10],
             required_sources=sources,
-            budget=budget or self.default_budget,
+            budget=budget if budget is not None else ResearchBudget(
+                max_tokens=self.default_budget.max_tokens, max_requests=self.default_budget.max_requests
+            ),
             metadata={
                 "context_thesis_count": len(context.active_theses) if context else 0,
                 "has_falsification_conditions": len(context.falsification_conditions) > 0 if context else False,
@@ -98,30 +94,19 @@ class ResearchPlanner:
     async def execute_plan(self, plan: ResearchPlan) -> ResearchResult:
         collected = []
 
-        if SourceProvider.DART in plan.required_sources and plan.budget.can_request():
-            dart_evidence = await self._collect_dart_filings(plan)
-            collected.extend(dart_evidence)
-            self._consume_budget(plan, dart_evidence)
-
-        if SourceProvider.FINANCIAL_STATEMENTS in plan.required_sources and plan.budget.can_request():
-            financial_evidence = await self._collect_financial_statements(plan)
-            collected.extend(financial_evidence)
-            self._consume_budget(plan, financial_evidence)
-
-        if SourceProvider.NEWS_KR in plan.required_sources and plan.budget.can_request():
-            news_evidence = await self._collect_news(plan)
-            collected.extend(news_evidence)
-            self._consume_budget(plan, news_evidence)
-
-        if SourceProvider.TECHNICAL in plan.required_sources and plan.budget.can_request():
-            tech_evidence = await self._collect_technical(plan)
-            collected.extend(tech_evidence)
-            self._consume_budget(plan, tech_evidence)
-
-        if SourceProvider.MACRO_KR in plan.required_sources and plan.budget.can_request():
-            macro_evidence = await self._collect_macro(plan)
-            collected.extend(macro_evidence)
-            self._consume_budget(plan, macro_evidence)
+        source_status: dict[str, str] = {}
+        for source in plan.required_sources:
+            if not isinstance(source, SourceProvider):
+                source_status["INVALID_SOURCE"] = "UNSUPPORTED"
+                continue
+            if source.value in source_status:
+                continue
+            if source == SourceProvider.DART:
+                dart_evidence, status = await self._collect_dart_filings(plan)
+                collected.extend(dart_evidence)
+                source_status[source.value] = status
+            else:
+                source_status[source.value] = "UNSUPPORTED"
 
         unique_collected, duplicates_removed = deduplicate_evidence(collected)
 
@@ -136,41 +121,44 @@ class ResearchPlanner:
             has_new_evidence=len(unique_collected) > 0,
             metadata={
                 "questions_asked": len(plan.questions),
-                "sources_used": [s.value for s in plan.required_sources],
+                "source_status": source_status,
+                "status": "BLOCKED" if any(status != "OK" for status in source_status.values()) else "COMPLETED",
             },
         )
 
         return result
 
 
-    def _consume_budget(self, plan: ResearchPlan, evidence_list: list[CollectedEvidence]) -> None:
-        for ev in evidence_list:
-            plan.budget.consume(ev.tokens_used, ev.request_count)
-
-    async def _collect_dart_filings(self, plan: ResearchPlan) -> list[CollectedEvidence]:
+    async def _collect_dart_filings(self, plan: ResearchPlan) -> tuple[list[CollectedEvidence], str]:
         if not self.dart_client:
-            return []
+            return [], "NOT_CONFIGURED"
+
+        parts = plan.asset_id.split(":")
+        corp_code = plan.metadata.get("dart_corp_code")
+        if len(parts) != 4 or parts[0] != "KRX" or not isinstance(corp_code, str) or len(corp_code) != 8 or not corp_code.isascii() or not corp_code.isdigit():
+            return [], "IDENTITY_UNVERIFIED"
+        if not plan.budget.can_request(0):
+            return [], "BUDGET_EXCEEDED"
 
         try:
+            plan.budget.consume(0, 1)
             filings = await self.dart_client.search_recent_filings(
-                corp_name=plan.asset_id,
+                corp_code=corp_code,
                 days_back=30,
             )
 
             evidence_list = []
             for filing in filings[:20]:
-                if not plan.budget.can_request():
-                    break
+                if filing.corp_code != corp_code or filing.stock_code != parts[2]:
+                    return [], "IDENTITY_MISMATCH"
+                if filing.published_at_utc is None:
+                    return [], "PUBLICATION_TIME_UNVERIFIED"
                 ev = convert_filing_to_evidence(filing, plan.thesis_id, plan.asset_id)
                 evidence_list.append(ev)
 
-            return evidence_list
-        except Exception as e:
-            return [CollectedEvidence(
-                evidence=None,  # type: ignore
-                source_provider=SourceProvider.DART,
-                metadata={"error": str(e)},
-            )]
+            return evidence_list, "OK"
+        except Exception:
+            return [], "COLLECTION_FAILED"
 
     async def _collect_financial_statements(self, plan: ResearchPlan) -> list[CollectedEvidence]:
         return []
@@ -189,37 +177,11 @@ class ResearchPlanner:
         result: ResearchResult,
         context: ContextEnvelope | None = None,
     ) -> str:
+        if result.metadata.get("status") == "BLOCKED":
+            return "조사에 실패하거나 지원하지 않는 출처가 있어 판단을 차단해야 합니다."
         if not result.has_new_evidence:
             return "신규 수집된 근거 없음."
-
-        evidence_summary = []
-        for ev in result.collected[:10]:
-            if ev.evidence:
-                content_str = str(ev.evidence.content)[:500]
-                evidence_summary.append(
-                    f"- [{ev.source_provider.value}] {ev.evidence.evidence_type.value}: {content_str}"
-                )
-
-        prompt = f"""다음은 {result.asset_id}에 대한 투자 연구 수집 결과입니다.
-수집된 근거들을 종합하여 300자 이내 한국어 요약을 작성하세요.
-
-수집 근거:
-{chr(10).join(evidence_summary)}
-
-요약:"""
-
-        prompt = sanitize_prompt_input(prompt)
-
-        try:
-            request = AIRequest(
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=500,
-                temperature=0.3,
-            )
-            response: AIResponse = await self.ai_router.generate(request)
-            return sanitize_prompt_input(response.content)
-        except Exception:
-            return "AI 요약 생성 실패. 원본 근거 참고 요망."
+        return f"수집된 근거 {len(result.collected)}건. AI 요약은 지원하지 않습니다."
 
     async def close(self):
         if self.dart_client:

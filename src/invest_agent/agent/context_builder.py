@@ -35,9 +35,9 @@ class ActiveThesis:
 @dataclass(slots=True)
 class FalsificationCondition:
     """기각 조건."""
-    condition_id: UUID = field(default_factory=uuid4)
     thesis_id: UUID
     condition_type: str
+    condition_id: UUID = field(default_factory=uuid4)
     threshold_value: Decimal | None = None
     description: str = ""
     is_triggered: bool = False

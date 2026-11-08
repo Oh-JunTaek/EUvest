@@ -15,6 +15,7 @@ from invest_agent.market.market_data import AssetType, Market, round_price
 class OrderEventType(StrEnum):
     CREATED = "CREATED"
     SUBMITTED = "SUBMITTED"
+    SUBMITTING = "SUBMITTING"
     ACKNOWLEDGED = "ACKNOWLEDGED"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
@@ -85,7 +86,7 @@ class Order:
         self.status = new_status
         self.updated_at = datetime.now(UTC)
 
-        if new_status == OrderStatus.SUBMITTED:
+        if new_status == OrderStatus.SUBMITTING:
             self.submitted_at = self.updated_at
         elif new_status == OrderStatus.ACKNOWLEDGED:
             self.acknowledged_at = self.updated_at
@@ -113,8 +114,7 @@ class Order:
             self.avg_fill_price = fill_price
         else:
             total_value = self.avg_fill_price * Decimal(str(self.filled_quantity)) + fill_price * Decimal(str(fill_qty))
-            self.filled_quantity += fill_qty
-            self.avg_fill_price = total_value / Decimal(str(self.filled_quantity))
+            self.avg_fill_price = total_value / Decimal(str(self.filled_quantity + fill_qty))
 
         self.filled_quantity += fill_qty
         self.remaining_quantity = self.quantity - self.filled_quantity

@@ -26,7 +26,7 @@ class SizingParams:
     market: Market              # 시장
     asset_type: AssetType       # 자산 유형
     side: OrderSide             # 매수/매도
-    fx_rate: Decimal = Decimal("1")  # 기준통화 → 시장통화 환율 (1 market_currency = fx_rate base_currency)
+    fx_rate: Decimal = Decimal("1")  # 1 base_currency = fx_rate market_currency (예: 1 USD = 1300 KRW)
 
 
 @dataclass(frozen=True)

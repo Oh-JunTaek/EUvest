@@ -66,6 +66,7 @@ class RiskGate:
         position_qty=0,
         side='BUY',
     ):
+        sell_qty = sizing_result.quantity if side == 'SELL' else 0
         checks = []
 
         if not sizing_result.feasible:
@@ -166,19 +167,33 @@ class RiskGate:
                 value=daily_pnl,
             ))
 
-        if side == 'SELL' and position_qty <= 0:
-            if not self.allow_short:
-                checks.append(RiskCheck(
-                    name='short_sell_prohibited',
-                    result=RiskCheckResult.REJECT,
-                    message='공매도 금지: 보유 수량 없음',
-                ))
-            else:
-                checks.append(RiskCheck(
-                    name='short_sell_allowed',
-                    result=RiskCheckResult.WARN,
-                    message='공매도 허용됨 (보유 수량 없음)',
-                ))
+        if side == 'SELL':
+            if sell_qty > position_qty:
+                if not self.allow_short:
+                    checks.append(RiskCheck(
+                        name='short_sell_prohibited',
+                        result=RiskCheckResult.REJECT,
+                        message=f'공매도 금지: 매도 수량({sell_qty}) > 보유 수량({position_qty})',
+                    ))
+                else:
+                    checks.append(RiskCheck(
+                        name='short_sell_allowed',
+                        result=RiskCheckResult.WARN,
+                        message=f'공매도 허용됨: 매도 수량({sell_qty}) > 보유 수량({position_qty})',
+                    ))
+            elif position_qty <= 0:
+                if not self.allow_short:
+                    checks.append(RiskCheck(
+                        name='short_sell_prohibited',
+                        result=RiskCheckResult.REJECT,
+                        message='공매도 금지: 보유 수량 없음',
+                    ))
+                else:
+                    checks.append(RiskCheck(
+                        name='short_sell_allowed',
+                        result=RiskCheckResult.WARN,
+                        message='공매도 허용됨 (보유 수량 없음)',
+                    ))
 
         has_reject = any(c.result == RiskCheckResult.REJECT for c in checks)
         has_warn = any(c.result == RiskCheckResult.WARN for c in checks)

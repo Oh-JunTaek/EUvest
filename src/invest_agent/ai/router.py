@@ -214,11 +214,20 @@ class ProviderRouter:
 
                 response = await provider.generate(request)
 
-                response.content = SecretFilter.filter(response.content)
-                if response.raw_response:
-                    response.raw_response = SecretFilter.filter_dict(response.raw_response)
-
-                return response
+                # Create new response with filtered content (AIResponse is frozen)
+                filtered_content = SecretFilter.filter(response.content)
+                filtered_raw = SecretFilter.filter_dict(response.raw_response) if response.raw_response else None
+                return AIResponse(
+                    content=filtered_content,
+                    model=response.model,
+                    provider=response.provider,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    latency_ms=response.latency_ms,
+                    timestamp=response.timestamp,
+                    finish_reason=response.finish_reason,
+                    raw_response=filtered_raw,
+                )
 
             except Exception as e:
                 last_error = e
@@ -258,11 +267,20 @@ class ProviderRouter:
 
                 response = await provider.generate_structured(request, schema)
 
-                response.content = SecretFilter.filter(response.content)
-                if response.raw_response:
-                    response.raw_response = SecretFilter.filter_dict(response.raw_response)
-
-                return response
+                # Create new response with filtered content (AIResponse is frozen)
+                filtered_content = SecretFilter.filter(response.content)
+                filtered_raw = SecretFilter.filter_dict(response.raw_response) if response.raw_response else None
+                return AIResponse(
+                    content=filtered_content,
+                    model=response.model,
+                    provider=response.provider,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    latency_ms=response.latency_ms,
+                    timestamp=response.timestamp,
+                    finish_reason=response.finish_reason,
+                    raw_response=filtered_raw,
+                )
 
             except Exception as e:
                 last_error = e

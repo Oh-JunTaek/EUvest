@@ -1,0 +1,17 @@
+
+with open('tests/unit/test_execution_p06.py', 'w', encoding='utf-8') as f:
+    f.write(chr(34)*3 + 'P0-06 test - order engine, risk gate, sizing.' + chr(34)*3 + chr(10)*2)
+    f.write('from __future__ import annotations' + chr(10)*2)
+    f.write('from decimal import Decimal' + chr(10))
+    f.write('from uuid import uuid4' + chr(10)*2)
+    f.write('import pytest' + chr(10)*2)
+    f.write('from invest_agent.domain.enums import (' + chr(10))
+    f.write('    AssetType,' + chr(10))
+    f.write('    Market,' + chr(10))
+    f.write('    OrderSide,' + chr(10))
+    f.write('    OrderStatus,' + chr(10))
+    f.write('    OrderType,' + chr(10))
+    f.write(')' + chr(10)*2)
+    f.write('from invest_agent.execution.order_engine import OrderEngine, Order' + chr(10))
+    f.write('from invest_agent.execution.risk_gate import RiskGate, RiskCheckResult' + chr(10))
+    f.write('from invest_agent.execution.sizing import calculate_sizing, SizingParams' + chr(10)*2)

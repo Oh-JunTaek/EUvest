@@ -14,6 +14,8 @@ from invest_agent.market.market_data import AssetType, Market, round_price
 
 class OrderEventType(StrEnum):
     CREATED = "CREATED"
+    PRECHECKED = "PRECHECKED"
+    RESERVED = "RESERVED"
     SUBMITTED = "SUBMITTED"
     SUBMITTING = "SUBMITTING"
     ACKNOWLEDGED = "ACKNOWLEDGED"
@@ -22,6 +24,7 @@ class OrderEventType(StrEnum):
     CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass
@@ -70,7 +73,7 @@ class Order:
             OrderStatus.SUBMITTING: {OrderStatus.ACKNOWLEDGED, OrderStatus.REJECTED, OrderStatus.CANCELLED},
             OrderStatus.ACKNOWLEDGED: {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.UNKNOWN},
             OrderStatus.PARTIALLY_FILLED: {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED, OrderStatus.CANCELLED},
-            OrderStatus.FILLED: {OrderStatus.CANCELLED},
+            OrderStatus.FILLED: set(),  # FILLED is terminal - no further transitions
             OrderStatus.CANCELLED: set(),
             OrderStatus.REJECTED: set(),
             OrderStatus.UNKNOWN: {OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED},
@@ -80,7 +83,7 @@ class Order:
 
     def transition_to(self, new_status: OrderStatus, **kwargs) -> bool:
         if not self.can_transition_to(new_status):
-            return False
+            raise ValueError(f"Invalid transition: {self.status} -> {new_status}")
 
         old_status = self.status
         self.status = new_status
@@ -107,6 +110,9 @@ class Order:
         return True
 
     def fill(self, fill_qty: int, fill_price: Decimal) -> bool:
+        if self.status not in {OrderStatus.ACKNOWLEDGED, OrderStatus.PARTIALLY_FILLED}:
+            raise ValueError(f"Cannot fill order in status {self.status}")
+
         if fill_qty <= 0 or fill_qty > self.remaining_quantity:
             return False
 
@@ -212,7 +218,7 @@ class OrderEngine:
             order.broker_order_id = broker_order_id
             self._broker_order_index[broker_order_id] = order_id
 
-        return order.transition_to(OrderStatus.ACKNOWLEDGED, broker_order_id=broker_order_id)
+        return True
 
     def acknowledge_order(self, order_id: str, broker_order_id: str) -> bool:
         order = self._orders.get(order_id)

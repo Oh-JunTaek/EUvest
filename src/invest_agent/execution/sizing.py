@@ -22,11 +22,11 @@ class SizingParams:
     current_weight_bps: int     # 현재 비중 (basis points)
     portfolio_value: Decimal    # 총 포트폴리오 가치 (기준 통화)
     asset_price: Decimal        # 자산 현재가 (해당 시장 통화)
-    available_cash: Decimal     # 가용 현금 (해당 시장 통화)
+    available_cash: Decimal     # 가용 현금 (기준 통화)
     market: Market              # 시장
     asset_type: AssetType       # 자산 유형
     side: OrderSide             # 매수/매도
-    fx_rate: Decimal = Decimal("1")  # 1 base_currency = fx_rate market_currency (예: 1 USD = 1300 KRW)
+    fx_rate: Decimal = Decimal("1")  # 환율: 1 market_currency = fx_rate base_currency (예: 1 USD = 1300 KRW)
 
 
 @dataclass(frozen=True)
@@ -50,8 +50,51 @@ def calculate_target_quantity(params: SizingParams) -> SizingResult:
     Returns:
         계산된 주문 수량과 관련 정보
     """
+    if params.fx_rate <= 0:
+        return SizingResult(
+            quantity=0,
+            notional=Decimal("0"),
+            notional_base=Decimal("0"),
+            weight_delta_bps=0,
+            cash_required=Decimal("0"),
+            feasible=False,
+            reason="환율은 양수여야 함",
+        )
+    if params.asset_price <= 0:
+        return SizingResult(
+            quantity=0,
+            notional=Decimal("0"),
+            notional_base=Decimal("0"),
+            weight_delta_bps=0,
+            cash_required=Decimal("0"),
+            feasible=False,
+            reason="자산 가격은 양수여야 함",
+        )
+
     # 비중 차이 계산 (bps)
     weight_delta_bps = params.target_weight_bps - params.current_weight_bps
+
+    # 매매 방향과 비중 증감 일치 검증
+    if params.side == OrderSide.BUY and weight_delta_bps < 0:
+        return SizingResult(
+            quantity=0,
+            notional=Decimal("0"),
+            notional_base=Decimal("0"),
+            weight_delta_bps=0,
+            cash_required=Decimal("0"),
+            feasible=False,
+            reason="매수 주문인데 목표 비중이 현재보다 낮음",
+        )
+    if params.side == OrderSide.SELL and weight_delta_bps > 0:
+        return SizingResult(
+            quantity=0,
+            notional=Decimal("0"),
+            notional_base=Decimal("0"),
+            weight_delta_bps=0,
+            cash_required=Decimal("0"),
+            feasible=False,
+            reason="매도 주문인데 목표 비중이 현재보다 높음",
+        )
 
     # 매도인 경우 현재 보유량 확인 필요 (여기서는 목표 비중 기준으로 계산)
     if weight_delta_bps == 0:
@@ -68,8 +111,8 @@ def calculate_target_quantity(params: SizingParams) -> SizingResult:
     # 목표 명목가액 계산 (기준 통화)
     target_notional_base = params.portfolio_value * Decimal(str(abs(weight_delta_bps))) / Decimal("10000")
 
-    # 시장 통화로 환산
-    target_notional_market = target_notional_base * params.fx_rate
+    # 시장 통화로 환산: base_amount / fx_rate (1 market = fx_rate base)
+    target_notional_market = target_notional_base / params.fx_rate
 
     # 필요 수량 계산 (소수점 허용 후 lot 단위 반올림)
     raw_quantity = target_notional_market / params.asset_price
@@ -114,20 +157,21 @@ def calculate_target_quantity(params: SizingParams) -> SizingResult:
 
     # 최종 명목가액
     notional_market = rounded_price * Decimal(str(quantity))
-    notional_base = notional_market / params.fx_rate
+    notional_base = notional_market * params.fx_rate
 
-    # 현금 필요액
-    cash_required = notional_market if params.side == OrderSide.BUY else Decimal("0")
+    # 현금 필요액 (기준 통화)
+    cash_required = notional_base if params.side == OrderSide.BUY else Decimal("0")
 
-    # 가용 현금 확인
+    # 가용 현금 확인 (기준 통화)
     if params.side == OrderSide.BUY and cash_required > params.available_cash:
         # 가용 현금에 맞춰 수량 축소
-        max_qty = int((params.available_cash / rounded_price) // lot_size) * lot_size
+        max_notional_base = params.available_cash
+        max_qty = int((max_notional_base / (rounded_price * params.fx_rate)) // lot_size) * lot_size
         if max_qty >= min_qty:
             quantity = max_qty
             notional_market = rounded_price * Decimal(str(quantity))
-            notional_base = notional_market / params.fx_rate
-            cash_required = notional_market
+            notional_base = notional_market * params.fx_rate
+            cash_required = notional_base
         else:
             return SizingResult(
                 quantity=0,

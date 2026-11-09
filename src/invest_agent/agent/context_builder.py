@@ -8,11 +8,13 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+from invest_agent.domain.enums import OrderStatus
 from invest_agent.domain.models import (
     EquitySnapshot,
     OrderRecord,
 )
 from invest_agent.storage.repositories import (
+    AgentRunRepository,
     DecisionRepository,
     EquitySnapshotRepository,
     OrderRepository,
@@ -74,6 +76,7 @@ class ContextBuilder:
     """ContextEnvelope 구성기."""
     def __init__(self, db_path: str):
         self.thesis_repo = ThesisRepository(db_path)
+        self.run_repo = AgentRunRepository(db_path)
         self.decision_repo = DecisionRepository(db_path)
         self.order_repo = OrderRepository(db_path)
         self.snapshot_repo = EquitySnapshotRepository(db_path)
@@ -137,7 +140,7 @@ class ContextBuilder:
         return conditions
 
     def _build_recent_history(self, max_history: int) -> list[RecentHistoryEntry]:
-        runs = self.decision_repo.get_recent_runs(max_history)
+        runs = self.run_repo.get_latest(max_history)
         history = []
         for run in runs:
             decisions = self.decision_repo.get_by_run(run.id)
@@ -148,7 +151,7 @@ class ContextBuilder:
         return history
 
     def _get_latest_snapshot(self) -> EquitySnapshot | None:
-        recent_runs = self.decision_repo.get_recent_runs(1)
+        recent_runs = self.run_repo.get_latest(1)
         if not recent_runs:
             return None
         latest_run = recent_runs[0]
@@ -158,7 +161,15 @@ class ContextBuilder:
         return None
 
     def _get_open_orders(self) -> list[OrderRecord]:
-        return []
+        # Get recent runs and find open orders
+        recent_runs = self.run_repo.get_latest(5)
+        open_orders = []
+        for run in recent_runs:
+            orders = self.order_repo.get_by_run(run.id)
+            for order in orders:
+                if order.status in (OrderStatus.INTENT_CREATED, OrderStatus.PRECHECKED, OrderStatus.RESERVED, OrderStatus.SUBMITTING, OrderStatus.ACKNOWLEDGED, OrderStatus.PARTIALLY_FILLED):
+                    open_orders.append(order)
+        return open_orders
 
     def _extract_usd_cash(self, snapshot: EquitySnapshot) -> Decimal:
         usd_cash = Decimal("0")

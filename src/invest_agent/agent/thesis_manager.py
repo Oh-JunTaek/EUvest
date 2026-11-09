@@ -48,7 +48,8 @@ class HandoffSnapshot:
 
     change_reason: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
-def to_dict(self) -> dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """직렬화용 딕셔너리 변환."""
         return {
             "from_run_id": str(self.from_run_id),

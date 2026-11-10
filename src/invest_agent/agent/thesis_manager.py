@@ -16,6 +16,7 @@ from invest_agent.domain.models import (
 )
 from invest_agent.storage.repositories import (
     DecisionRepository,
+    HandoffRepository,
     ThesisRepository,
 )
 
@@ -116,6 +117,7 @@ class ThesisManager:
     def __init__(self, db_path: str):
         self.thesis_repo = ThesisRepository(db_path)
         self.decision_repo = DecisionRepository(db_path)
+        self.handoff_repo = HandoffRepository(db_path)
 
     def create_thesis(
         self,
@@ -257,7 +259,7 @@ class ThesisManager:
             change_reason=change_reason,
         )
 
-        Handoff(
+        handoff = Handoff(
             from_run_id=from_run_id,
             to_run_id=to_run_id,
             thesis_id=context.active_theses[0].thesis_id if context.active_theses else UUID(int=0),
@@ -271,6 +273,7 @@ class ThesisManager:
             model_name_from=model_name_from,
             model_name_to=model_name_to,
         )
+        self.handoff_repo.save(handoff)
         return snapshot
 
     def apply_handoff(self, snapshot: HandoffSnapshot) -> list[ThesisUpdate]:

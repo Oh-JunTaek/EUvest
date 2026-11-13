@@ -370,6 +370,16 @@ class AgentRunRepository:
             ).fetchall()
             return [self._row_to_run(row) for row in rows]
 
+    def get_by_date(self, target_date: datetime) -> list[AgentRun]:
+        """특정 날짜의 실행 기록 조회 (UTC 기준)."""
+        date_str = target_date.date().isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_runs WHERE date(started_at) = ? ORDER BY started_at DESC",
+                (date_str,),
+            ).fetchall()
+            return [self._row_to_run(row) for row in rows]
+
     def _row_to_run(self, row: sqlite3.Row) -> AgentRun:
         return AgentRun(
             id=UUID(row["id"]),

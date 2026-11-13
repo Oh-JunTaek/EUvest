@@ -16,6 +16,9 @@ dependencies = [
     "numpy>=1.24",
 ]
 
+[project.scripts]
+invest = "invest_agent.cli:app"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

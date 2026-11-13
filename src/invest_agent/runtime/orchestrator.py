@@ -14,6 +14,7 @@ from invest_agent.broker.mock_broker import MockBroker
 from invest_agent.broker.protocol import BrokerProtocol
 from invest_agent.domain.enums import (
     AssetType,
+    ExecutionMode,
     Market,
     OrderSide,
     OrderStatus,
@@ -129,6 +130,18 @@ class Orchestrator:
         started_at: datetime,
     ) -> RunOnceResult:
         """run-once 전체 실행 흐름."""
+        # OFFLINE_SIM 모드에서만 주문 실행 허용
+        if self.settings.execution.mode != ExecutionMode.OFFLINE_SIM:
+            return await self._finalize_run(
+                run=run,
+                status=RunStatus.COMPLETED,
+                decision_outcome=DecisionOutcome.NO_TRADE,
+                error=f"주문 실행은 OFFLINE_SIM 모드에서만 허용됨 (현재: {self.settings.execution.mode.value})",
+                started_at=started_at,
+                orders_created=0,
+                orders_filled=0,
+            )
+
         try:
             # 1. 컨텍스트 수집
             run.status = RunStatus.COLLECTING

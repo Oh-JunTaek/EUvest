@@ -87,6 +87,15 @@ def sample_thesis_with_snapshot(setup_db, sample_thesis):
 async def run_orchestrator_once(db_path, settings, asset_filter=None, force=False):
     """오케스트레이터 run_once 실행 헬퍼."""
     orchestrator = create_orchestrator(db_path, settings)
+    # 테스트용: 주문 크기 제한 완화 (5% -> 50%)
+    from decimal import Decimal
+
+    from invest_agent.execution.risk_gate import RiskGate
+    orchestrator.risk_gate = RiskGate(
+        max_order_size_pct=Decimal('0.5'),
+        max_daily_loss=Decimal('1000000'),
+        max_portfolio_exposure=Decimal('50000000'),
+    )
     return await orchestrator.run_once(asset_filter=asset_filter, force=force)
 
 

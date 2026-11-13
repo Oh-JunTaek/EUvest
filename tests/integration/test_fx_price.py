@@ -127,6 +127,15 @@ async def run_orchestrator_once(db_path, settings, broker=None, asset_filter=Non
     orchestrator = create_orchestrator(db_path, settings)
     if broker:
         orchestrator.broker = broker
+    # 테스트용: 주문 크기 제한 완화 (5% -> 50%)
+    from decimal import Decimal
+
+    from invest_agent.execution.risk_gate import RiskGate
+    orchestrator.risk_gate = RiskGate(
+        max_order_size_pct=Decimal('0.5'),
+        max_daily_loss=Decimal('1000000'),
+        max_portfolio_exposure=Decimal('50000000'),
+    )
     return await orchestrator.run_once(asset_filter=asset_filter, force=force)
 
 

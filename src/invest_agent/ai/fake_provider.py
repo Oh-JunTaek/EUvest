@@ -39,7 +39,15 @@ class FakeProvider(AIProvider):
             max_context_tokens=4096,
             max_output_tokens=2048,
         )
-        self._default_response = default_response or {"decision": "HOLD", "confidence": 0.5}
+        # 기본 HOLD 대신 매수 결정 반환하도록 변경
+        self._default_response = default_response or {
+            "outcome": "TRADE",
+            "side": "BUY",
+            "target_weight_bps": 1000,
+            "current_weight_bps": 0,
+            "rationale": "Test buy order",
+            "evidence_ids": [],
+        }
         self._latency_ms = latency_ms
         self._call_count = 0
         self._fail_after = fail_after_calls

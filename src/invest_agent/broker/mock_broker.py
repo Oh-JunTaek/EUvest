@@ -26,15 +26,18 @@ class MockBroker(BrokerProtocol):
         initial_cash: Decimal = Decimal("100000000"),
         initial_positions: dict[str, Decimal] | None = None,
         quotes: dict[str, Decimal] | None = None,
+        fx_rate_usd_krw: Decimal = Decimal("1300"),
     ):
         self._environment = "MOCK"
         self._connected = True
 
-        # 계좌 상태
-        self._cash = initial_cash
+        # 계좌 상태 (KRW 기준 현금 + USD 현금 분리)
+        self._cash_krw = initial_cash
+        self._cash_usd = Decimal("0")
         self._positions: dict[str, dict] = {}
         self._quotes: dict[str, Decimal] = quotes or {}
         self._orders: dict[str, dict] = {}
+        self._fx_rate_usd_krw = fx_rate_usd_krw
 
         # 초기 포지션 설정
         if initial_positions:
@@ -44,7 +47,22 @@ class MockBroker(BrokerProtocol):
                     "quantity": qty,
                     "avg_price": price,
                     "current_price": price,
+                    "currency": "USD" if asset_id.startswith("US:") else "KRW",
                 }
+
+    def set_fx_rate(self, fx_rate: Decimal) -> None:
+        """환율 설정."""
+        self._fx_rate_usd_krw = fx_rate
+
+    def _convert_usd_to_krw(self, usd_amount: Decimal) -> Decimal:
+        """USD를 KRW로 환산."""
+        return usd_amount * self._fx_rate_usd_krw
+
+    def _convert_krw_to_usd(self, krw_amount: Decimal) -> Decimal:
+        """KRW를 USD로 환산."""
+        if self._fx_rate_usd_krw == 0:
+            return Decimal("0")
+        return krw_amount / self._fx_rate_usd_krw
 
     @property
     def environment(self) -> str:
@@ -58,14 +76,21 @@ class MockBroker(BrokerProtocol):
         return self._connected
 
     def get_balance(self) -> Balance:
-        total_equity = self._cash
+        # 총자산 계산 (모든 포지션을 KRW로 환산)
+        total_equity = self._cash_krw
         for pos in self._positions.values():
-            total_equity += pos["quantity"] * pos["current_price"]
+            qty = pos["quantity"]
+            curr_price = pos["current_price"]
+            currency = pos.get("currency", "KRW")
+            if currency == "USD":
+                total_equity += qty * curr_price * self._fx_rate_usd_krw
+            else:
+                total_equity += qty * curr_price
 
         return Balance(
             currency="KRW",
-            total_cash=self._cash,
-            available_cash=self._cash,
+            total_cash=self._cash_krw,
+            available_cash=self._cash_krw,
             total_equity=total_equity,
             updated_at=datetime.now(UTC),
         )
@@ -76,14 +101,18 @@ class MockBroker(BrokerProtocol):
             qty = pos["quantity"]
             avg_price = pos["avg_price"]
             curr_price = pos["current_price"]
+            currency = pos.get("currency", "KRW")
+            market_value = qty * curr_price
+            if currency == "USD":
+                market_value = market_value * self._fx_rate_usd_krw
             result.append(Position(
                 asset_id=asset_id,
                 quantity=qty,
                 avg_price=avg_price,
                 current_price=curr_price,
-                market_value=qty * curr_price,
-                unrealized_pnl=qty * (curr_price - avg_price),
-                currency="KRW",
+                market_value=market_value,
+                unrealized_pnl=qty * (curr_price - avg_price) * (self._fx_rate_usd_krw if currency == "USD" else Decimal("1")),
+                currency=currency,
             ))
         return result
 
@@ -189,27 +218,53 @@ class MockBroker(BrokerProtocol):
         o["status"] = "FILLED" if filled_qty >= o["quantity"] else "PARTIALLY_FILLED"
         o["updated_at"] = datetime.now(UTC)
 
+        # 자산 통화 확인
+        asset_id = o["asset_id"]
+        is_usd = asset_id.startswith("US:")
+
         # 현금/포지션 업데이트
         if o["side"] == "BUY":
-            cost = filled_qty * filled_price
-            self._cash -= cost
-            if o["asset_id"] in self._positions:
-                pos = self._positions[o["asset_id"]]
-                pos["quantity"] += filled_qty
+            if is_usd:
+                # USD 자산: filled_price는 USD, KRW로 환산하여 현금 차감
+                cost_krw = filled_qty * filled_price * self._fx_rate_usd_krw
+                self._cash_krw -= cost_krw
             else:
-                self._positions[o["asset_id"]] = {
+                # KRW 자산: filled_price는 KRW
+                cost_krw = filled_qty * filled_price
+                self._cash_krw -= cost_krw
+
+            if asset_id in self._positions:
+                pos = self._positions[asset_id]
+                pos["quantity"] += filled_qty
+                # 평균 단가 업데이트 (가중 평균)
+                total_qty = pos["quantity"]
+                pos["avg_price"] = (
+                    (pos["avg_price"] * (total_qty - filled_qty)) + (filled_price * filled_qty)
+                ) / total_qty
+            else:
+                self._positions[asset_id] = {
                     "quantity": filled_qty,
                     "avg_price": filled_price,
                     "current_price": filled_price,
+                    "currency": "USD" if is_usd else "KRW",
                 }
         else:  # SELL
-            proceeds = filled_qty * filled_price
-            self._cash += proceeds
-            if o["asset_id"] in self._positions:
-                pos = self._positions[o["asset_id"]]
+            if is_usd:
+                proceeds_krw = filled_qty * filled_price * self._fx_rate_usd_krw
+                self._cash_krw += proceeds_krw
+            else:
+                proceeds_krw = filled_qty * filled_price
+                self._cash_krw += proceeds_krw
+
+            if asset_id in self._positions:
+                pos = self._positions[asset_id]
                 pos["quantity"] -= filled_qty
                 if pos["quantity"] <= 0:
-                    del self._positions[o["asset_id"]]
+                    del self._positions[asset_id]
+            else:
+                # 포지션이 없는데 매도하는 경우 (공매도 시뮬레이션)
+                pass
+
         return True
 
     def cancel_order(self, order_id: str) -> bool:

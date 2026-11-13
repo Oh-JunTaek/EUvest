@@ -333,16 +333,33 @@ class Orchestrator:
 
         snapshot = envelope.latest_snapshot
 
+        # 시장 데이터(현재가, 환율) 조회
+        asset_id = thesis.asset_id
+        market_data = self._get_market_data(asset_id)
+        if market_data is None:
+            from invest_agent.execution.risk_gate import RiskCheck, RiskCheckResult, RiskGateResult
+            return RiskGateResult(
+                overall=RiskCheckResult.REJECT,
+                checks=[RiskCheck(
+                    name='market_data_missing',
+                    result=RiskCheckResult.REJECT,
+                    message=f'시장 데이터 조회 실패: {asset_id} (가격 또는 환율 없음)',
+                )]
+            )
+
+        price, fx_rate = market_data
+        is_us = asset_id.startswith("US:")
+
         sizing_params = SizingParams(
             target_weight_bps=decision.target_weight_bps or 0,
             current_weight_bps=decision.current_weight_bps or 0,
             portfolio_value=snapshot.total_equity,
-            asset_price=Decimal('100000'),
+            asset_price=price,
             available_cash=snapshot.cash_balance,
-            market=Market.KRX if 'KRX' in envelope.active_theses[0].asset_id else Market.US,
-            asset_type=envelope.active_theses[0].asset_id.split(':')[1] if ':' in envelope.active_theses[0].asset_id else 'STOCK',
+            market=Market.US if is_us else Market.KRX,
+            asset_type=asset_id.split(':')[1] if ':' in asset_id else 'STOCK',
             side=decision.side or OrderSide.BUY,
-            fx_rate=Decimal('1300') if 'US' in envelope.active_theses[0].asset_id else Decimal('1'),
+            fx_rate=fx_rate,
         )
 
         sizing_result = calculate_target_quantity(sizing_params)
@@ -380,16 +397,26 @@ class Orchestrator:
         if not snapshot:
             return 0, 0
 
+        # 시장 데이터(현재가, 환율) 조회 - 위험 검증과 동일한 값 사용
+        asset_id = thesis.asset_id
+        market_data = self._get_market_data(asset_id)
+        if market_data is None:
+            # 시장 데이터가 없으면 주문 실행 안 함
+            return 0, 0
+
+        price, fx_rate = market_data
+        is_us = asset_id.startswith("US:")
+
         sizing_params = SizingParams(
             target_weight_bps=decision.target_weight_bps or 0,
             current_weight_bps=decision.current_weight_bps or 0,
             portfolio_value=snapshot.total_equity,
-            asset_price=Decimal('100000'),
+            asset_price=price,
             available_cash=snapshot.cash_balance,
-            market=Market.KRX if 'KRX' in thesis.asset_id else Market.US,
-            asset_type=thesis.asset_id.split(':')[1] if ':' in thesis.asset_id else 'STOCK',
+            market=Market.US if is_us else Market.KRX,
+            asset_type=asset_id.split(':')[1] if ':' in asset_id else 'STOCK',
             side=decision.side,
-            fx_rate=Decimal('1300') if 'US' in thesis.asset_id else Decimal('1'),
+            fx_rate=fx_rate,
         )
 
         sizing_result = calculate_target_quantity(sizing_params)
@@ -397,14 +424,17 @@ class Orchestrator:
         if not sizing_result.feasible or sizing_result.quantity <= 0:
             return 0, 0
 
+        # 주문 가격은 현재가 사용 (LIMIT 주문)
+        order_price = price
+
         order = self.order_engine.create_order(
             asset_id=thesis.asset_id,
-            market=Market.KRX if 'KRX' in thesis.asset_id else Market.US,
+            market=Market.US if is_us else Market.KRX,
             asset_type=AssetType.STOCK,
             side=decision.side,
             order_type=OrderType.LIMIT,
             quantity=sizing_result.quantity,
-            price=Decimal('100000'),
+            price=order_price,
             idempotency_key=f'{run.id}-{thesis.thesis_id}-{decision.id}',
         )
 
@@ -419,7 +449,7 @@ class Orchestrator:
             side=decision.side,
             order_type=OrderType.LIMIT,
             quantity=Decimal(str(sizing_result.quantity)),
-            price=Decimal('100000'),
+            price=order_price,
             status=OrderStatus.ACKNOWLEDGED,
             broker_order_id=f'mock-{order.id}',
         )
@@ -432,16 +462,16 @@ class Orchestrator:
             side=decision.side.value,
             order_type='LIMIT',
             quantity=Decimal(str(sizing_result.quantity)),
-            price=Decimal('100000'),
+            price=order_price,
         )
 
         mock_order_id = list(self.broker._orders.keys())[-1]
-        self.broker.fill_order(mock_order_id, Decimal(str(sizing_result.quantity)), Decimal('100000'))
+        self.broker.fill_order(mock_order_id, Decimal(str(sizing_result.quantity)), order_price)
 
-        self.order_engine.fill_order(order.id, sizing_result.quantity, Decimal('100000'))
+        self.order_engine.fill_order(order.id, sizing_result.quantity, order_price)
         order_record.status = OrderStatus.FILLED
         order_record.filled_quantity = Decimal(str(sizing_result.quantity))
-        order_record.filled_price=Decimal('100000')
+        order_record.filled_price = order_price
         order_record.filled_at = datetime.now(UTC)
         self.order_repo.save(order_record)
 
@@ -449,6 +479,37 @@ class Orchestrator:
 
     async def _reconcile_orders(self, run: AgentRun) -> None:
         pass
+
+    def _get_market_data(self, asset_id: str) -> tuple[Decimal, Decimal] | None:
+        """자산의 현재가와 환율 조회.
+
+        Args:
+            asset_id: 자산 ID (예: 'KRX:005930' 또는 'US:AAPL')
+
+        Returns:
+            (price, fx_rate) 튜플. 가격 또는 환율 정보가 없으면 None.
+            - price: 자산 현재가 (해당 시장 통화, KRW 또는 USD)
+            - fx_rate: 1 시장통화 = fx_rate 기준통화(KRW)
+              예: 1 USD = 1300 KRW 이면 fx_rate=1300
+              국내 주식(KRX)은 1 KRW = 1 KRW 이므로 fx_rate=1
+        """
+        # 1. 현재가 조회 (브로커에서)
+        quote = self.broker.get_quote(asset_id)
+        if quote.price <= 0:
+            return None
+        price = quote.price
+
+        # 2. 환율 결정
+        is_us = asset_id.startswith("US:")
+        if is_us:
+            fx_rate = self.settings.execution.mock_fx_rate_usd_krw
+        else:
+            fx_rate = Decimal("1")  # 국내 주식은 KRW 기준
+
+        if fx_rate <= 0:
+            return None
+
+        return (price, fx_rate)
 
     async def _finalize_run(
         self,

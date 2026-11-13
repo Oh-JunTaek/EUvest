@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -128,6 +129,8 @@ class ExecutionConfig(BaseModel):
     require_broker_reconciliation: bool = True
     order_type: Literal["LIMIT_ONLY", "LIMIT", "MARKET"] = "LIMIT_ONLY"
     market_sessions: Literal["REGULAR_ONLY", "ALL"] = "REGULAR_ONLY"
+    # Mock FX rate for OFFLINE_SIM (1 USD = X KRW)
+    mock_fx_rate_usd_krw: Decimal = Field(default=Decimal("1300"), ge=0)
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",

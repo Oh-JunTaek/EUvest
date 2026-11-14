@@ -133,7 +133,8 @@ DDL_STATEMENTS = [
         cash_krw TEXT NOT NULL DEFAULT '0',
         cash_usd TEXT NOT NULL DEFAULT '0',
         fx_rate_usd_krw TEXT NOT NULL DEFAULT '1300',
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        initialized INTEGER NOT NULL DEFAULT 0
     )
     """,
     # mock_positions: 모의 보유 포지션
@@ -426,11 +427,18 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
             conn.execute(ddl)
             print("Created processed_fills table")
 
+    # Add initialized column if not exists (for existing DBs migrated before this change)
+    try:
+        conn.execute("SELECT initialized FROM mock_account LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE mock_account ADD COLUMN initialized INTEGER NOT NULL DEFAULT 0")
+        print("Added initialized column to mock_account")
+
     # 기본 mock_account 레코드 생성 (없는 경우)
     existing = conn.execute("SELECT 1 FROM mock_account WHERE id = 'default'").fetchone()
     if not existing:
         conn.execute(
-            "INSERT INTO mock_account (id, cash_krw, cash_usd, fx_rate_usd_krw, updated_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO mock_account (id, cash_krw, cash_usd, fx_rate_usd_krw, updated_at, initialized) VALUES (?, ?, ?, ?, ?, 0)",
             ('default', '0', '0', '1300', datetime.now(UTC).isoformat())
         )
         print("Inserted default mock_account record")
@@ -455,7 +463,7 @@ def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
             return
         if current < 1 or current > target_version:
             raise ValueError(f"지원하지 않는 기존 스키마 버전: {current}")
-        
+
         data_version = conn.execute("PRAGMA data_version").fetchone()[0]
         _backup_db(conn, path)
         conn.execute("PRAGMA foreign_keys = OFF")
@@ -464,17 +472,17 @@ def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
             raise sqlite3.OperationalError("백업 중 DB가 변경됨: 마이그레이션 중단")
         if conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] != current:
             raise sqlite3.OperationalError("스키마 버전이 변경됨: 마이그레이션 중단")
-        
+
         # v1 -> v2
         if current == 1 and target_version >= 2:
             _migrate_v1_to_v2(conn)
             current = 2
-        
+
         # v2 -> v3
         if current == 2 and target_version >= 3:
             _migrate_v2_to_v3(conn)
             current = 3
-        
+
         conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                      (target_version, datetime.now(UTC).isoformat()))
         if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:

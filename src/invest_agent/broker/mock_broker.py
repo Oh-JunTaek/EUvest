@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
-
-import sqlite3
 
 from invest_agent.broker.protocol import (
     Balance,
@@ -83,19 +82,24 @@ class MockBroker(BrokerProtocol):
         """DB에서 계좌 상태와 포지션 로드."""
         cursor = self._conn.cursor()
 
-        # Load mock_account
+        # Load mock_account (including initialized flag)
         row = cursor.execute(
-            "SELECT cash_krw, cash_usd, fx_rate_usd_krw FROM mock_account WHERE id = 'default'"
+            "SELECT cash_krw, cash_usd, fx_rate_usd_krw, initialized FROM mock_account WHERE id = 'default'"
         ).fetchone()
         if row:
             loaded_cash_krw = Decimal(row["cash_krw"])
-            # If loaded cash is 0 (default from migration), use initial_cash
-            if loaded_cash_krw == 0:
+            initialized = row["initialized"]
+            # If account was created by migration (initialized=0), use initial_cash
+            # If explicitly initialized (initialized=1), restore as-is even if 0
+            if initialized == 0:
                 self._cash_krw = self._initial_cash
             else:
                 self._cash_krw = loaded_cash_krw
             self._cash_usd = Decimal(row["cash_usd"])
             self._fx_rate_usd_krw = Decimal(row["fx_rate_usd_krw"])
+            # Persist the initial cash and mark as initialized if migrated
+            if initialized == 0:
+                self._save_account()
         else:
             # Initialize default record
             self._cash_krw = self._initial_cash
@@ -116,20 +120,18 @@ class MockBroker(BrokerProtocol):
 
     def _load_quotes(self) -> None:
         """DB에서 시세 로드 (mock_positions의 current_price 기준)."""
-        # Quotes are not separately stored; current_price in positions serves as quote
         pass
 
     def _load_fx_rate(self) -> None:
         """DB에서 환율 로드."""
-        # Already loaded in _load_state from mock_account
         pass
 
     def _save_account(self) -> None:
-        """계좌 상태 저장 (cash_krw, cash_usd, fx_rate)."""
+        """계좌 상태 저장 (cash_krw, cash_usd, fx_rate, initialized)."""
         if not self._db_path:
             return
         self._conn.execute(
-            "INSERT OR REPLACE INTO mock_account (id, cash_krw, cash_usd, fx_rate_usd_krw, updated_at) VALUES ('default', ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO mock_account (id, cash_krw, cash_usd, fx_rate_usd_krw, updated_at, initialized) VALUES ('default', ?, ?, ?, ?, 1)",
             (str(self._cash_krw), str(self._cash_usd), str(self._fx_rate_usd_krw), datetime.now(UTC).isoformat())
         )
         self._conn.commit()
@@ -138,19 +140,18 @@ class MockBroker(BrokerProtocol):
         """포지션 저장."""
         if not self._db_path or asset_id not in self._positions:
             return
-        pos = self._positions[asset_id]
         self._conn.execute(
             "INSERT OR REPLACE INTO mock_positions (asset_id, quantity, avg_price, current_price, currency, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
             (asset_id, str(self._positions[asset_id]["quantity"]), str(self._positions[asset_id]["avg_price"]), str(self._positions[asset_id]["current_price"]), self._positions[asset_id]["currency"], datetime.now(UTC).isoformat())
         )
         self._conn.commit()
 
-    def _save_quote(self, asset_id: str) -> None:
-        """시세 저장 (포지션의 current_price 업데이트로 대체)."""
-        if not self._db_path or asset_id not in self._positions:
+    def _delete_position(self, asset_id: str) -> None:
+        """포지션 삭제 (전량 매도 시)."""
+        if not self._db_path:
             return
-        # Update current_price in mock_positions
-        self._save_position(asset_id)
+        self._conn.execute("DELETE FROM mock_positions WHERE asset_id = ?", (asset_id,))
+        self._conn.commit()
 
     def _save_fill(self, fill_id: str, order_id: str, asset_id: str, side: str, filled_qty: Decimal, filled_price: Decimal) -> None:
         """체결 기록 저장 (중복 방지용)."""
@@ -196,7 +197,6 @@ class MockBroker(BrokerProtocol):
         return self._connected
 
     def get_balance(self) -> Balance:
-        # 총자산 계산 (모든 포지션을 KRW로 환산)
         total_equity = self._cash_krw
         for pos in self._positions.values():
             qty = pos["quantity"]
@@ -238,7 +238,6 @@ class MockBroker(BrokerProtocol):
 
     def get_quote(self, asset_id: str) -> Quote:
         price = self._quotes.get(asset_id, Decimal("10000"))
-        # Also check positions for current_price
         if asset_id in self._positions:
             price = self._positions[asset_id]["current_price"]
         return Quote(
@@ -342,8 +341,8 @@ class MockBroker(BrokerProtocol):
             return False
         o = self._orders[order_id]
 
-        # Check for duplicate fill
-        fill_id = f"{order_id}-{o['filled_quantity']}-{filled_qty}"
+        # Check for duplicate fill using stable fill_id (order_id + filled_qty + filled_price)
+        fill_id = f"{order_id}-{filled_qty}-{filled_price}"
         if self._is_fill_processed(fill_id):
             return False  # Already processed
 
@@ -352,58 +351,63 @@ class MockBroker(BrokerProtocol):
         o["status"] = "FILLED" if filled_qty >= o["quantity"] else "PARTIALLY_FILLED"
         o["updated_at"] = datetime.now(UTC)
 
-        # 자산 통화 확인
         asset_id = o["asset_id"]
         is_usd = asset_id.startswith("US:")
 
-        # 현금/포지션 업데이트
-        if o["side"] == "BUY":
-            if is_usd:
-                # USD 자산: filled_price는 USD, KRW로 환산하여 현금 차감
-                cost_krw = filled_qty * filled_price * self._fx_rate_usd_krw
-                self._cash_krw -= cost_krw
-            else:
-                # KRW 자산: filled_price는 KRW
-                cost_krw = filled_qty * filled_price
-                self._cash_krw -= cost_krw
+        if self._db_path:
+            self._conn.execute("BEGIN IMMEDIATE")
 
-            if asset_id in self._positions:
-                pos = self._positions[asset_id]
-                pos["quantity"] += filled_qty
-                # 평균 단가 업데이트 (가중 평균)
-                total_qty = pos["quantity"]
-                pos["avg_price"] = (
-                    (pos["avg_price"] * (total_qty - filled_qty)) + (filled_price * filled_qty)
-                ) / total_qty
-            else:
-                self._positions[asset_id] = {
-                    "quantity": filled_qty,
-                    "avg_price": filled_price,
-                    "current_price": filled_price,
-                    "currency": "USD" if is_usd else "KRW",
-                }
-        else:  # SELL
-            if is_usd:
-                proceeds_krw = filled_qty * filled_price * self._fx_rate_usd_krw
-                self._cash_krw += proceeds_krw
-            else:
-                proceeds_krw = filled_qty * filled_price
-                self._cash_krw += proceeds_krw
+        try:
+            if o["side"] == "BUY":
+                if is_usd:
+                    cost_krw = filled_qty * filled_price * self._fx_rate_usd_krw
+                    self._cash_krw -= cost_krw
+                else:
+                    cost_krw = filled_qty * filled_price
+                    self._cash_krw -= cost_krw
 
-            if asset_id in self._positions:
-                pos = self._positions[asset_id]
-                pos["quantity"] -= filled_qty
-                if pos["quantity"] <= 0:
-                    del self._positions[asset_id]
-            else:
-                # 포지션이 없는데 매도하는 경우 (공매도 시뮬레이션)
-                pass
+                if asset_id in self._positions:
+                    pos = self._positions[asset_id]
+                    pos["quantity"] += filled_qty
+                    total_qty = pos["quantity"]
+                    pos["avg_price"] = (
+                        (pos["avg_price"] * (total_qty - filled_qty)) + (filled_price * filled_qty)
+                    ) / total_qty
+                else:
+                    self._positions[asset_id] = {
+                        "quantity": filled_qty,
+                        "avg_price": filled_price,
+                        "current_price": filled_price,
+                        "currency": "USD" if is_usd else "KRW",
+                    }
+            else:  # SELL
+                if is_usd:
+                    proceeds_krw = filled_qty * filled_price * self._fx_rate_usd_krw
+                    self._cash_krw += proceeds_krw
+                else:
+                    proceeds_krw = filled_qty * filled_price
+                    self._cash_krw += proceeds_krw
 
-        # Save state
-        self._save_account()
-        if asset_id in self._positions:
-            self._save_position(asset_id)
-        self._save_fill(f"{order_id}-{o['filled_quantity']}-{filled_qty}", order_id, asset_id, o["side"], filled_qty, filled_price)
+                if asset_id in self._positions:
+                    pos = self._positions[asset_id]
+                    pos["quantity"] -= filled_qty
+                    if pos["quantity"] <= 0:
+                        del self._positions[asset_id]
+                        if self._db_path:
+                            self._delete_position(asset_id)
+                else:
+                    pass
+
+            if self._db_path:
+                self._save_account()
+                if asset_id in self._positions:
+                    self._save_position(asset_id)
+                self._save_fill(fill_id, order_id, asset_id, o["side"], filled_qty, filled_price)
+                self._conn.commit()
+        except Exception:
+            if self._db_path:
+                self._conn.rollback()
+            raise
 
         return True
 

@@ -83,7 +83,7 @@ class Orchestrator:
         self.risk_gate = create_risk_gate_for_mode(self.settings.execution.mode)
 
         if self.broker is None:
-            self.broker = MockBroker(initial_cash=Decimal("100000000"))
+            self.broker = MockBroker(initial_cash=Decimal("100000000"), db_path=self.db_path)
     async def run_once(
         self,
         run_id: UUID | None = None,

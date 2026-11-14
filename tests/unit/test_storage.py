@@ -670,13 +670,13 @@ class TestSchemaAndMigration:
     def test_schema_version_recorded(self):
         init_db(self.db_path)
         version = get_schema_version(self.db_path)
-        assert version == 2
+        assert version == 3
 
     def test_migrate_idempotent(self):
         init_db(self.db_path)
         migrate(self.db_path)
         version = get_schema_version(self.db_path)
-        assert version == 2
+        assert version == 3
 
     def test_init_rejects_existing_db_without_changing_version(self):
         import sqlite3
@@ -1009,7 +1009,7 @@ class TestMigrationFromLegacy:
 
         monkeypatch.setattr(schema, "_migrate_v1_to_v2", attempt_write_during_rebuild)
         migrate(self.db_path)
-        assert get_schema_version(self.db_path) == 2
+        assert get_schema_version(self.db_path) == 3
 
     def test_invalid_foreign_key_in_backup_prevents_migration(self):
         import sqlite3
@@ -1175,9 +1175,9 @@ class TestMigrationFromLegacy:
         # 3. 마이그레이션 실행
         migrate(self.db_path)
 
-        # 4. 스키마 버전이 2로 업데이트되었는지 확인
+        # 4. 스키마 버전이 3로 업데이트되었는지 확인
         version = get_schema_version(self.db_path)
-        assert version == 2
+        assert version == 3
 
         # 5. FK가 RESTRICT로 변경되었는지 검증 (PRAGMA foreign_key_list)
         conn = sqlite3.connect(str(self.db_path))

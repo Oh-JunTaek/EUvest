@@ -57,7 +57,8 @@ def test_generate_daily_report_with_runs(setup_db):
     thesis_repo = ThesisRepository(setup_db)
     from invest_agent.domain.models import Thesis
 
-    target_date = datetime.now(UTC)
+    # Use a fixed date late in the day to avoid date boundary issues when subtracting hours
+    target_date = datetime(2026, 11, 14, 23, 0, 0, tzinfo=UTC)
 
     # 성공한 실행 1개
     thesis1 = Thesis(

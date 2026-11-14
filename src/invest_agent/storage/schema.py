@@ -8,7 +8,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL_STATEMENTS = [
     # theses 테이블
@@ -124,6 +124,39 @@ DDL_STATEMENTS = [
         FOREIGN KEY (to_run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT,
         FOREIGN KEY (thesis_id) REFERENCES theses(id) ON DELETE RESTRICT,
         FOREIGN KEY (previous_decision_id) REFERENCES decisions(id) ON DELETE RESTRICT
+    )
+    """,
+    # mock_account: 모의 계좌 현금/환율 (OFFLINE_SIM 전용)
+    """
+    CREATE TABLE IF NOT EXISTS mock_account (
+        id TEXT PRIMARY KEY DEFAULT 'default',
+        cash_krw TEXT NOT NULL DEFAULT '0',
+        cash_usd TEXT NOT NULL DEFAULT '0',
+        fx_rate_usd_krw TEXT NOT NULL DEFAULT '1300',
+        updated_at TEXT NOT NULL
+    )
+    """,
+    # mock_positions: 모의 보유 포지션
+    """
+    CREATE TABLE IF NOT EXISTS mock_positions (
+        asset_id TEXT PRIMARY KEY,
+        quantity TEXT NOT NULL,
+        avg_price TEXT NOT NULL,
+        current_price TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    # processed_fills: 처리된 체결 기록 (중복 방지)
+    """
+    CREATE TABLE IF NOT EXISTS processed_fills (
+        fill_id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        filled_qty TEXT NOT NULL,
+        filled_price TEXT NOT NULL,
+        processed_at TEXT NOT NULL
     )
     """,
     # equity_snapshots 테이블
@@ -370,6 +403,42 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
 
 
 
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 -> v3 마이그레이션: 모의 계좌 영속화 테이블 추가.
+
+    새 테이블 추가:
+    - mock_account: 모의 계좌 현금/환율
+    - mock_positions: 모의 보유 포지션
+    - processed_fills: 처리된 체결 기록 (중복 방지)
+
+    이 테이블들은 기존 데이터와 무관하게 새로 생성되므로 단순 생성만 수행.
+    """
+    # 새 테이블 생성
+    for ddl in DDL_STATEMENTS:
+        if 'CREATE TABLE IF NOT EXISTS mock_account' in ddl:
+            conn.execute(ddl)
+            print("Created mock_account table")
+        elif 'CREATE TABLE IF NOT EXISTS mock_positions' in ddl:
+            conn.execute(ddl)
+            print("Created mock_positions table")
+        elif 'CREATE TABLE IF NOT EXISTS processed_fills' in ddl:
+            conn.execute(ddl)
+            print("Created processed_fills table")
+
+    # 기본 mock_account 레코드 생성 (없는 경우)
+    existing = conn.execute("SELECT 1 FROM mock_account WHERE id = 'default'").fetchone()
+    if not existing:
+        conn.execute(
+            "INSERT INTO mock_account (id, cash_krw, cash_usd, fx_rate_usd_krw, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ('default', '0', '0', '1300', datetime.now(UTC).isoformat())
+        )
+        print("Inserted default mock_account record")
+
+    print("Migration v2 -> v3 completed")
+
+
+
 def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
     """마이그레이션 실행 (현재 버전 -> 타겟 버전)."""
     if target_version != SCHEMA_VERSION:
@@ -384,8 +453,9 @@ def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
         current = current_row[0]
         if current == target_version:
             return
-        if current != 1:
+        if current < 1 or current > target_version:
             raise ValueError(f"지원하지 않는 기존 스키마 버전: {current}")
+        
         data_version = conn.execute("PRAGMA data_version").fetchone()[0]
         _backup_db(conn, path)
         conn.execute("PRAGMA foreign_keys = OFF")
@@ -394,7 +464,17 @@ def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
             raise sqlite3.OperationalError("백업 중 DB가 변경됨: 마이그레이션 중단")
         if conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] != current:
             raise sqlite3.OperationalError("스키마 버전이 변경됨: 마이그레이션 중단")
-        _migrate_v1_to_v2(conn)
+        
+        # v1 -> v2
+        if current == 1 and target_version >= 2:
+            _migrate_v1_to_v2(conn)
+            current = 2
+        
+        # v2 -> v3
+        if current == 2 and target_version >= 3:
+            _migrate_v2_to_v3(conn)
+            current = 3
+        
         conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                      (target_version, datetime.now(UTC).isoformat()))
         if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:

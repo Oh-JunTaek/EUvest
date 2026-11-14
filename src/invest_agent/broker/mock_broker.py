@@ -126,7 +126,7 @@ class MockBroker(BrokerProtocol):
         """DB에서 환율 로드."""
         pass
 
-    def _save_account(self) -> None:
+    def _save_account(self, commit: bool = True) -> None:
         """계좌 상태 저장 (cash_krw, cash_usd, fx_rate, initialized)."""
         if not self._db_path:
             return
@@ -134,9 +134,10 @@ class MockBroker(BrokerProtocol):
             "INSERT OR REPLACE INTO mock_account (id, cash_krw, cash_usd, fx_rate_usd_krw, updated_at, initialized) VALUES ('default', ?, ?, ?, ?, 1)",
             (str(self._cash_krw), str(self._cash_usd), str(self._fx_rate_usd_krw), datetime.now(UTC).isoformat())
         )
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
 
-    def _save_position(self, asset_id: str) -> None:
+    def _save_position(self, asset_id: str, commit: bool = True) -> None:
         """포지션 저장."""
         if not self._db_path or asset_id not in self._positions:
             return
@@ -144,16 +145,18 @@ class MockBroker(BrokerProtocol):
             "INSERT OR REPLACE INTO mock_positions (asset_id, quantity, avg_price, current_price, currency, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
             (asset_id, str(self._positions[asset_id]["quantity"]), str(self._positions[asset_id]["avg_price"]), str(self._positions[asset_id]["current_price"]), self._positions[asset_id]["currency"], datetime.now(UTC).isoformat())
         )
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
 
-    def _delete_position(self, asset_id: str) -> None:
+    def _delete_position(self, asset_id: str, commit: bool = True) -> None:
         """포지션 삭제 (전량 매도 시)."""
         if not self._db_path:
             return
         self._conn.execute("DELETE FROM mock_positions WHERE asset_id = ?", (asset_id,))
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
 
-    def _save_fill(self, fill_id: str, order_id: str, asset_id: str, side: str, filled_qty: Decimal, filled_price: Decimal) -> None:
+    def _save_fill(self, fill_id: str, order_id: str, asset_id: str, side: str, filled_qty: Decimal, filled_price: Decimal, commit: bool = True) -> None:
         """체결 기록 저장 (중복 방지용)."""
         if not self._db_path:
             return
@@ -161,7 +164,8 @@ class MockBroker(BrokerProtocol):
             "INSERT OR IGNORE INTO processed_fills (fill_id, order_id, asset_id, side, filled_qty, filled_price, processed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (fill_id, order_id, asset_id, side, str(filled_qty), str(filled_price), datetime.now(UTC).isoformat())
         )
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
 
     def _is_fill_processed(self, fill_id: str) -> bool:
         """체결이 이미 처리되었는지 확인."""
@@ -346,6 +350,11 @@ class MockBroker(BrokerProtocol):
         if self._is_fill_processed(fill_id):
             return False  # Already processed
 
+        # Save pre-state for potential rollback
+        prev_cash_krw = self._cash_krw
+        prev_cash_usd = self._cash_usd
+        prev_positions = {k: v.copy() for k, v in self._positions.items()}
+
         o["filled_quantity"] = filled_qty
         o["filled_price"] = filled_price
         o["status"] = "FILLED" if filled_qty >= o["quantity"] else "PARTIALLY_FILLED"
@@ -394,17 +403,21 @@ class MockBroker(BrokerProtocol):
                     if pos["quantity"] <= 0:
                         del self._positions[asset_id]
                         if self._db_path:
-                            self._delete_position(asset_id)
+                            self._delete_position(asset_id, commit=False)
                 else:
                     pass
 
             if self._db_path:
-                self._save_account()
+                self._save_account(commit=False)
                 if asset_id in self._positions:
-                    self._save_position(asset_id)
-                self._save_fill(fill_id, order_id, asset_id, o["side"], filled_qty, filled_price)
+                    self._save_position(asset_id, commit=False)
+                self._save_fill(fill_id, order_id, asset_id, o["side"], filled_qty, filled_price, commit=False)
                 self._conn.commit()
         except Exception:
+            # Restore in-memory state on rollback
+            self._cash_krw = prev_cash_krw
+            self._cash_usd = prev_cash_usd
+            self._positions = prev_positions
             if self._db_path:
                 self._conn.rollback()
             raise

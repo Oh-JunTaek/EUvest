@@ -5,8 +5,7 @@ from contextlib import closing
 
 import pytest
 
-from invest_agent.storage.legacy_reader import read_legacy_snapshot, LEGACY_TABLES
-from invest_agent.storage.schema import init_db
+from invest_agent.storage.legacy_reader import read_legacy_snapshot
 
 
 def test_read_preserves_existing_values_and_db(tmp_path):
@@ -15,7 +14,7 @@ def test_read_preserves_existing_values_and_db(tmp_path):
     with closing(sqlite3.connect(path)) as conn:
         conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT)")
         conn.execute("INSERT INTO schema_version VALUES (2, '2024-01-01')")
-        
+
         # Create all legacy tables
         conn.execute("""CREATE TABLE theses (
             id TEXT PRIMARY KEY,

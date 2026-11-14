@@ -53,7 +53,7 @@ class TestMockAccountPersistence:
         """마이그레이션으로 생성된 계좌(initialized=0)는 초기 현금으로 복원되는지 확인."""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "test.db")
-            
+
             # Create a v2 database first (simulate pre-migration state)
             import sqlite3
             conn = sqlite3.connect(db_path)
@@ -69,11 +69,11 @@ class TestMockAccountPersistence:
             conn.execute("CREATE TABLE equity_snapshots (id TEXT PRIMARY KEY, run_id TEXT, timestamp TEXT, total_equity TEXT, cash_balance TEXT, positions TEXT, unrealized_pnl TEXT, realized_pnl TEXT, metadata TEXT)")
             conn.commit()
             conn.close()
-            
+
             # Now migrate to v3 (this creates mock_account with initialized=0)
             from invest_agent.storage.schema import migrate
             migrate(db_path)
-            
+
             # Verify migration created mock_account with initialized=0
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row

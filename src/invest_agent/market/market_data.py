@@ -286,3 +286,44 @@ def to_utc(market_dt: datetime, market: Market) -> datetime:
     if market_dt.tzinfo is None:
         market_dt = market_dt.replace(tzinfo=tz)
     return market_dt.astimezone(UTC)
+
+
+def fetch_ohlcv(
+    asset_id: str,
+    start_date: str,
+    end_date: str,
+    market: Market,
+    provider=None,
+) -> list[OHLCV]:
+    """일봉(OHLCV) 조회 편의 함수.
+
+    시장 데이터 공급자를 통해 OHLCV 데이터를 조회한다.
+
+    Args:
+        asset_id: 자산 ID (예: "KRX:005930", "US:AAPL")
+        start_date: 시작일 (YYYY-MM-DD)
+        end_date: 종료일 (YYYY-MM-DD)
+        market: 시장 (KRX 또는 US)
+        provider: 시장 데이터 공급자 (None이면 기본 공급자 사용)
+
+    Returns:
+        OHLCV 데이터 리스트
+
+    Raises:
+        MarketDataProviderError: 조회 실패 시
+    """
+    from invest_agent.market.protocol import OHLCVRequest
+    from invest_agent.market.provider_factory import get_market_data_provider
+
+    if provider is None:
+        provider = get_market_data_provider()
+
+    request = OHLCVRequest(
+        asset_id=asset_id,
+        start_date=start_date,
+        end_date=end_date,
+        market=market,
+    )
+
+    response = provider.fetch_ohlcv(request)
+    return response.data

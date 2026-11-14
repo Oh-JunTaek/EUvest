@@ -38,6 +38,14 @@ class AssetTypeConfig(BaseModel):
     DERIVATIVE: bool = False
 
 
+class MarketDataConfig(BaseModel):
+    """시장 데이터 공급자 설정."""
+    provider: Literal["fdr", "kis"] = "fdr"
+    fdr_request_delay_seconds: float = Field(default=1.0, ge=0.1, le=10.0)
+    fdr_timeout_seconds: int = Field(default=30, ge=5, le=300)
+    cache_ttl_seconds: int = Field(default=3600, ge=60, le=86400)  # 1시간 기본
+
+
 class CapitalConfig(BaseModel):
     cash_only: bool = True
     allow_margin: bool = False
@@ -144,6 +152,7 @@ class Settings(BaseSettings):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     markets: MarketConfig = Field(default_factory=MarketConfig)
     asset_types: AssetTypeConfig = Field(default_factory=AssetTypeConfig)
+    market_data: MarketDataConfig = Field(default_factory=MarketDataConfig)
     capital: CapitalConfig = Field(default_factory=CapitalConfig)
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
@@ -171,6 +180,13 @@ class Settings(BaseSettings):
     def _coerce_asset_types(cls, v: Any) -> AssetTypeConfig:
         if isinstance(v, dict):
             return AssetTypeConfig(**v)
+        return v
+
+    @field_validator("market_data", mode="before")
+    @classmethod
+    def _coerce_market_data(cls, v: Any) -> MarketDataConfig:
+        if isinstance(v, dict):
+            return MarketDataConfig(**v)
         return v
 
     @field_validator("capital", mode="before")

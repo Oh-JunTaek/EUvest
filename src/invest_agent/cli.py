@@ -460,5 +460,117 @@ def market_fetch(
     console.print(f"  Fetched at: {result.fetched_at.isoformat()}")
 
 
+@market_app.command("show")
+def market_show(
+    asset: str = typer.Option(
+        ...,
+        "--asset",
+        "-a",
+        help="자산 ID (예: KRX:005930, US:AAPL)",
+    ),
+    limit: int = typer.Option(
+        5,
+        "--limit",
+        "-l",
+        help="출력할 일봉 개수 (기본값: 5)",
+        min=1,
+        max=100,
+    ),
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+) -> None:
+    """저장된 OHLCV 일봉 데이터 조회.
+
+    SQLite에 저장된 일봉 데이터를 최신순으로 출력합니다.
+
+    예시:
+        uv run invest market show --asset KRX:005930
+        uv run invest market show --asset US:AAPL --limit 10
+    """
+    from pathlib import Path
+
+    from invest_agent.storage.repositories import OHLCVRepository
+
+    # 입력 검증
+    try:
+        normalized_asset, market = _parse_asset_id(asset)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    if limit < 1:
+        console.print("[red]limit은 1 이상이어야 합니다.[/red]")
+        raise typer.Exit(1)
+
+    # DB 존재 확인
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[blue]Showing OHLCV for {normalized_asset} ({market.value})...[/blue]")
+    console.print(f"  DB: {db_path}")
+    console.print(f"  Limit: {limit}")
+
+    # 리포지토리로 조회
+    repo = OHLCVRepository(db_path)
+
+    # 저장된 공급자 목록 확인
+    providers = repo.get_providers(normalized_asset)
+    if not providers:
+        console.print(f"[yellow]해당 자산의 저장된 데이터가 없습니다: {normalized_asset}[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"  Providers: {', '.join(providers)}")
+
+    # 최신 데이터 조회 (공급자별로 최신 limit개씩)
+    all_rows = []
+    for provider in providers:
+        rows = repo.get_range(
+            asset_id=normalized_asset,
+            start_date="1900-01-01",
+            end_date="2100-12-31",
+            provider=provider,
+        )
+        # limit만큼만 가져오기
+        for row in rows[:limit]:
+            all_rows.append((provider, row))
+
+    # 날짜 내림차순 정렬
+    all_rows.sort(key=lambda x: x[1].timestamp, reverse=True)
+    all_rows = all_rows[:limit]
+
+    if not all_rows:
+        console.print("[yellow]조회된 데이터가 없습니다.[/yellow]")
+        raise typer.Exit(0)
+
+    # 테이블 출력
+    table = Table(title=f"OHLCV Data: {normalized_asset}")
+    table.add_column("Date", style="cyan", justify="center")
+    table.add_column("Open", style="green", justify="right")
+    table.add_column("High", style="green", justify="right")
+    table.add_column("Low", style="red", justify="right")
+    table.add_column("Close", style="bold", justify="right")
+    table.add_column("Volume", style="blue", justify="right")
+    table.add_column("Provider", style="magenta")
+
+    for provider, ohlcv in all_rows:
+        date_str = ohlcv.timestamp.date().isoformat()
+        table.add_row(
+            date_str,
+            f"{ohlcv.open:,.2f}",
+            f"{ohlcv.high:,.2f}",
+            f"{ohlcv.low:,.2f}",
+            f"{ohlcv.close:,.2f}",
+            f"{ohlcv.volume:,}",
+            provider,
+        )
+
+    console.print(table)
+
+
 if __name__ == "__main__":
     app()

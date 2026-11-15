@@ -258,11 +258,35 @@ class Orchestrator:
     ):
         """AI 결정 생성."""
         if not envelope.active_theses:
-            # 논문이 없으면 None 반환 (NO_TRADE로 처리됨)
             return None
 
-        # 첫 번째 논문에 대해 결정 요청
         thesis = envelope.active_theses[0]
+        asset_id = thesis.asset_id
+
+        # 시장 데이터 컨텍스트 확인
+        market_ctx = envelope.market_context.get(asset_id)
+        if not market_ctx:
+            return await self._create_no_trade_decision(
+                thesis, run,
+                "시장 데이터 컨텍스트가 없습니다 (asset_filter 없이 실행됨)."
+            )
+
+        if market_ctx.get("status") != "ok":
+            error_msg = market_ctx.get("error", "알 수 없는 시장 데이터 오류")
+            status = market_ctx.get("status", "error")
+            return await self._create_no_trade_decision(
+                thesis, run,
+                f"시장 데이터 상태: {status}. {error_msg}"
+            )
+
+        market_data = market_ctx.get("data", {})
+        is_sufficient = market_data.get("is_sufficient", False)
+        if not is_sufficient:
+            count = market_data.get("count", 0)
+            return await self._create_no_trade_decision(
+                thesis, run,
+                f"시장 데이터 부족: {count}개 일봉 (최소 20개 필요). 데이터 수집 후 재시도 필요."
+            )
 
         # AI 라우터를 통해 구조화된 결정 요청
         from invest_agent.ai.protocol import AIRequest
@@ -272,7 +296,6 @@ class Orchestrator:
 
         router = ProviderRouter()
 
-        # 결정 스키마
         decision_schema = {
             "type": "object",
             "properties": {
@@ -286,9 +309,30 @@ class Orchestrator:
             "required": ["outcome", "rationale"],
         }
 
+        provider = market_data.get("provider", "Unknown")
+        last_trade_date = market_data.get("last_trade_date", "Unknown")
+        fetched_at = market_data.get("fetched_at", "Unknown")
+        data_points = market_data.get("data_points", [])
+        recent_bars = data_points[:5]
+        bars_text = "\n".join([
+            f"  {bp['trade_date']}: O={bp['open']} H={bp['high']} L={bp['low']} C={bp['close']} V={bp['volume']}"
+            for bp in recent_bars
+        ])
+
+        market_context_text = f"""Market Context for {asset_id}:
+Provider: {provider}
+Last Trade Date: {last_trade_date}
+Data Fetched At: {fetched_at}
+Total Bars: {market_data.get('count', 0)} (Sufficient: {is_sufficient})
+Recent Bars (newest first):
+{bars_text}
+
+Note: This is historical OHLCV data, not real-time prices. Do not treat as current market prices.
+"""
+
         request = AIRequest(
             system_prompt="You are an investment decision engine. Output a JSON decision.",
-            user_prompt=f"Thesis: {thesis.hypothesis}\nRationale: {thesis.rationale}",
+            user_prompt=f"Thesis: {thesis.hypothesis}\nRationale: {thesis.rationale}\n\n{market_context_text}",
             response_format="json",
             max_tokens=1000,
         )
@@ -321,6 +365,32 @@ class Orchestrator:
             decided_at=datetime.now(UTC),
         )
 
+        self.decision_repo.save(decision)
+        run.decision_ids.append(decision.id)
+        self.run_repo.save(run)
+        return decision
+
+    async def _create_no_trade_decision(self, thesis, run, rationale: str):
+        """NO_TRADE 결정을 생성하고 저장."""
+        # 타이밍 이슈 방지: FakeProvider의 latency 시뮬레이션과 유사하게 최소 지연 추가
+        import asyncio
+        from datetime import UTC
+        from uuid import uuid4
+
+        from invest_agent.domain.models import Decision, DecisionOutcome
+        await asyncio.sleep(0.02)
+
+        decision = Decision(
+            id=uuid4(),
+            thesis_id=thesis.thesis_id,
+            run_id=run.id,
+            outcome=DecisionOutcome.NO_TRADE,
+            rationale=rationale,
+            model_provider="orchestrator",
+            model_name="internal",
+            execution_mode=self.settings.execution.mode.value,
+            decided_at=datetime.now(UTC),
+        )
         self.decision_repo.save(decision)
         run.decision_ids.append(decision.id)
         self.run_repo.save(run)

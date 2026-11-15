@@ -113,8 +113,8 @@ class FDRProvider(MarketDataProvider):
                 )
                 if ohlcv.is_valid():
                     ohlcv_list.append(ohlcv)
-            except (KeyError, ValueError, TypeError):
-                # 잘못된 행은 건너뜀
+            except (KeyError, ValueError, TypeError, Exception):
+                # 잘못된 행은 건너뜀 (decimal.InvalidOperation 포함)
                 continue
 
         return ohlcv_list
@@ -139,12 +139,19 @@ class FDRProvider(MarketDataProvider):
         # FDR 소스 결정 (KRX 직접 또는 네이버 폴백)
         source = "FinanceDataReader(KRX)" if request.market == Market.KRX else "FinanceDataReader(Yahoo)"
 
-        df = self._fetch_with_retry(
-            symbol=fdr_symbol,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            source=source,
-        )
+        try:
+            df = self._fetch_with_retry(
+                symbol=fdr_symbol,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                source=source,
+            )
+        except MarketDataProviderError:
+            raise
+        except Exception as e:
+            raise MarketDataProviderError(
+                f"FDR 조회 실패 ({source}: {fdr_symbol}, {request.start_date}~{request.end_date}): {e}"
+            ) from e
 
         ohlcv_list = self._convert_to_ohlcv(df, request.asset_id, request.market)
         fetched_at = datetime.now(UTC)

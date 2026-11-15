@@ -50,6 +50,9 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-q --tb=short"
+markers = [
+    "integration_network: marks tests that require network access (run with pytest -m integration_network)",
+]
 
 [tool.ruff]
 target-version = "py311"

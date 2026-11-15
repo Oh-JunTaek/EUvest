@@ -9,6 +9,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from invest_agent.market.ingestion import OHLCVIngestionService
+from invest_agent.market.market_data import Market
 from invest_agent.operations.health import check_health
 from invest_agent.reporting.daily import save_daily_report
 from invest_agent.runtime.orchestrator import create_orchestrator
@@ -331,6 +333,131 @@ def _print_run(run) -> None:
         lines.append(f"Error: {run.error}")
 
     console.print(Panel("\n".join(lines), title="Run Details", border_style="blue"))
+
+
+# === Market Command Group ===
+
+market_app = typer.Typer(name="market", help="시장 데이터 수집 및 조회")
+app.add_typer(market_app)
+
+
+def _parse_asset_id(asset_id: str) -> tuple[str, Market]:
+    """자산 ID에서 시장 판별.
+
+    Args:
+        asset_id: 자산 ID (예: "KRX:005930", "US:AAPL")
+
+    Returns:
+        (정규화된 자산 ID, 시장)
+
+    Raises:
+        ValueError: 지원하지 않는 시장 형식
+    """
+    asset_id = asset_id.strip().upper()
+    if asset_id.startswith("KRX:"):
+        return asset_id, Market.KRX
+    elif asset_id.startswith("US:"):
+        return asset_id, Market.US
+    else:
+        raise ValueError(
+            f"지원하지 않는 자산 ID 형식: {asset_id}. "
+            f"KRX:종목코드 또는 US:심볼 형식으로 입력하세요."
+        )
+
+
+def _validate_date(date_str: str) -> str:
+    """날짜 형식 검증 (YYYY-MM-DD).
+
+    Args:
+        date_str: 날짜 문자열
+
+    Returns:
+        검증된 날짜 문자열
+
+    Raises:
+        ValueError: 잘못된 날짜 형식
+    """
+    from datetime import datetime
+
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+        return date_str
+    except ValueError:
+        raise ValueError(f"잘못된 날짜 형식: {date_str}. YYYY-MM-DD 형식으로 입력하세요.")
+
+
+@market_app.command("fetch")
+def market_fetch(
+    asset: str = typer.Option(
+        ...,
+        "--asset",
+        "-a",
+        help="자산 ID (예: KRX:005930, US:AAPL)",
+    ),
+    start: str = typer.Option(
+        ...,
+        "--start",
+        "-s",
+        help="시작일 (YYYY-MM-DD)",
+    ),
+    end: str = typer.Option(
+        ...,
+        "--end",
+        "-e",
+        help="종료일 (YYYY-MM-DD)",
+    ),
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+) -> None:
+    """OHLCV 일봉 데이터 수집 및 저장.
+
+    FDR(FinanceDataReader)을 통해 일봉을 조회하고 SQLite에 저장합니다.
+
+    예시:
+        uv run invest market fetch --asset KRX:005930 --start 2024-01-01 --end 2024-01-31
+        uv run invest market fetch --asset US:AAPL --start 2024-01-01 --end 2024-01-31
+    """
+    from pathlib import Path
+
+    # 입력 검증
+    try:
+        normalized_asset, market = _parse_asset_id(asset)
+        start_date = _validate_date(start)
+        end_date = _validate_date(end)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    if start_date > end_date:
+        console.print("[red]시작일이 종료일보다 늦을 수 없습니다.[/red]")
+        raise typer.Exit(1)
+
+    # DB 초기화
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    ensure_db(db_path)
+
+    console.print(f"[blue]Fetching OHLCV for {normalized_asset} ({market.value})...[/blue]")
+    console.print(f"  Period: {start_date} ~ {end_date}")
+    console.print(f"  DB: {db_path}")
+
+    # 수집 서비스 실행
+    service = OHLCVIngestionService(db_path)
+    result = service.ingest(normalized_asset, market, start_date, end_date)
+
+    # 결과 출력
+    if result.error:
+        console.print(f"[red]Failed: {result.error}[/red]")
+        raise typer.Exit(1)
+
+    console.print("[green]Success![/green]")
+    console.print(f"  Provider: {result.provider}")
+    console.print(f"  Fetched: {result.fetched_count} rows")
+    console.print(f"  Saved:   {result.saved_count} rows")
+    console.print(f"  Fetched at: {result.fetched_at.isoformat()}")
 
 
 if __name__ == "__main__":

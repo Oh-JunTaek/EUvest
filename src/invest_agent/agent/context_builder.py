@@ -76,11 +76,17 @@ class ContextEnvelope:
     metadata: dict[str, Any] = field(default_factory=dict)
 class ContextBuilder:
     """ContextEnvelope 구성기."""
-    def __init__(self, db_path: str, market_lookback: int = 20):
+    def __init__(
+        self,
+        db_path: str,
+        market_lookback: int = 20,
+        market_reference_date: datetime | None = None,
+    ):
         if market_lookback <= 0:
             raise ValueError("market_lookback은 1 이상이어야 합니다.")
         self.db_path = db_path
         self.market_lookback = market_lookback
+        self.market_reference_date = market_reference_date
         self.thesis_repo = ThesisRepository(db_path)
         self.run_repo = AgentRunRepository(db_path)
         self.decision_repo = DecisionRepository(db_path)
@@ -145,6 +151,7 @@ class ContextBuilder:
                 asset_id=asset_id,
                 provider=None,  # 명시적 공급자 미지정 - 단일 공급자일 때만 자동 선택
                 lookback=self.market_lookback,
+                reference_date=self.market_reference_date,
             )
             envelope.market_context[asset_id] = {
                 "status": "ok",

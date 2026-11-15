@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -35,7 +36,6 @@ def _make_ohlcv(
     close_price: str = "78500",
     volume: int = 1000000,
 ) -> OHLCV:
-    from datetime import UTC, datetime
     from decimal import Decimal
     return OHLCV(
         timestamp=datetime.fromisoformat(date).replace(tzinfo=UTC),
@@ -47,6 +47,9 @@ def _make_ohlcv(
         asset_id=asset_id,
         market=market,
     )
+
+# 테스트용 고정 기준일 (2024-02-01로 설정하여 2024-01 데이터가 최신으로 판정되도록)
+TEST_REFERENCE_DATE = datetime(2024, 2, 1, tzinfo=UTC)
 
 
 def _seed_ohlcv_data(db_path: Path, asset_id: str, provider: str, dates: list[str], market: Market = Market.KRX):
@@ -67,6 +70,16 @@ def _seed_ohlcv_data(db_path: Path, asset_id: str, provider: str, dates: list[st
             ),
             provider=provider,
         )
+
+
+def _build_envelope(db_path: Path, asset_id: str, reference_date: datetime = None, market_lookback: int = 20, run_id=None):
+    """ContextBuilder로 envelope 생성 (reference_date 전달)."""
+    if reference_date is None:
+        reference_date = TEST_REFERENCE_DATE
+    builder = ContextBuilder(str(db_path), market_lookback=market_lookback, market_reference_date=reference_date)
+    if run_id is None:
+        run_id = uuid4()
+    return builder.build_context(run_id, asset_filter=[asset_id])
 
 
 class TestOrchestratorMarketContextGating:
@@ -111,7 +124,7 @@ class TestOrchestratorMarketContextGating:
         snapshot = EquitySnapshot(
             id=uuid4(),
             run_id=run.id,
-            timestamp=__import__('datetime').datetime.now(__import__('datetime').timezone.utc),
+            timestamp=TEST_REFERENCE_DATE,
             total_equity=Decimal("100000000"),
             cash_balance=Decimal("50000000"),
             positions={asset_id: {"quantity": "100", "avg_price": "70000"}},
@@ -132,8 +145,7 @@ class TestOrchestratorMarketContextGating:
 
         thesis, run = self._create_test_setup("KRX:005930")
 
-        builder = ContextBuilder(str(self.db_path), market_lookback=20)
-        envelope = builder.build_context(run.id, asset_filter=["KRX:005930"])
+        envelope = _build_envelope(self.db_path, "KRX:005930", run_id=run.id)
 
         settings = get_settings()
         orchestrator = Orchestrator(str(self.db_path), settings=settings)
@@ -181,8 +193,7 @@ class TestOrchestratorMarketContextGating:
 
         thesis, run = self._create_test_setup("KRX:999999")
 
-        builder = ContextBuilder(str(self.db_path))
-        envelope = builder.build_context(run.id, asset_filter=["KRX:999999"])
+        envelope = _build_envelope(self.db_path, "KRX:999999", run_id=run.id)
 
         settings = get_settings()
         orchestrator = Orchestrator(str(self.db_path), settings=settings)
@@ -213,8 +224,7 @@ class TestOrchestratorMarketContextGating:
 
         thesis, run = self._create_test_setup("KRX:005930")
 
-        builder = ContextBuilder(str(self.db_path))
-        envelope = builder.build_context(run.id, asset_filter=["KRX:005930"])
+        envelope = _build_envelope(self.db_path, "KRX:005930", run_id=run.id)
 
         settings = get_settings()
         orchestrator = Orchestrator(str(self.db_path), settings=settings)
@@ -240,8 +250,7 @@ class TestOrchestratorMarketContextGating:
 
         thesis, run = self._create_test_setup("KRX:005930")
 
-        builder = ContextBuilder(str(self.db_path), market_lookback=20)
-        envelope = builder.build_context(run.id, asset_filter=["KRX:005930"])
+        envelope = _build_envelope(self.db_path, "KRX:005930", run_id=run.id, market_lookback=20)
 
         settings = get_settings()
         orchestrator = Orchestrator(str(self.db_path), settings=settings)
@@ -272,8 +281,7 @@ class TestOrchestratorMarketContextGating:
 
         thesis, run = self._create_test_setup("KRX:005930")
 
-        builder = ContextBuilder(str(self.db_path), market_lookback=20)
-        envelope = builder.build_context(run.id, asset_filter=["KRX:005930"])
+        envelope = _build_envelope(self.db_path, "KRX:005930", run_id=run.id)
 
         settings = get_settings()
         orchestrator = Orchestrator(str(self.db_path), settings=settings)

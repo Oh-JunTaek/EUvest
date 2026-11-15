@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,6 @@ def _make_ohlcv(
     close_price: str = "78500",
     volume: int = 1000000,
 ) -> OHLCV:
-    from datetime import UTC, datetime
     from decimal import Decimal
     return OHLCV(
         timestamp=datetime.fromisoformat(date).replace(tzinfo=UTC),
@@ -35,6 +35,9 @@ def _make_ohlcv(
         asset_id=asset_id,
         market=market,
     )
+
+# 테스트용 고정 기준일 (2024-02-01로 설정하여 2024-01 데이터가 최신으로 판정되도록)
+TEST_REFERENCE_DATE = datetime(2024, 2, 1, tzinfo=UTC)
 
 class TestMarketContextBuilder:
     """MarketContextBuilder 테스트."""
@@ -78,7 +81,7 @@ class TestMarketContextBuilder:
         self._seed_data('KRX:005930', 'TestProvider', ['2024-01-02', '2024-01-03', '2024-01-04'])
 
         builder = MarketContextBuilder(self.db_path)
-        context = builder.build('KRX:005930')
+        context = builder.build('KRX:005930', reference_date=TEST_REFERENCE_DATE)
 
         assert context.asset_id == 'KRX:005930'
         assert context.market == Market.KRX
@@ -94,7 +97,7 @@ class TestMarketContextBuilder:
         self._seed_data('KRX:005930', 'TestProvider', dates)
 
         builder = MarketContextBuilder(self.db_path)
-        context = builder.build('KRX:005930', lookback=20)
+        context = builder.build('KRX:005930', lookback=20, reference_date=TEST_REFERENCE_DATE)
 
         assert context.count == 20
         assert context.is_sufficient
@@ -154,7 +157,7 @@ class TestMarketContextBuilder:
         )
 
         builder = MarketContextBuilder(self.db_path)
-        context = builder.build('US:AAPL')
+        context = builder.build('US:AAPL', reference_date=TEST_REFERENCE_DATE)
 
         assert context.asset_id == 'US:AAPL'
         assert context.market == Market.US
@@ -165,7 +168,7 @@ class TestMarketContextBuilder:
         self._seed_data('KRX:005930', 'TestProvider', ['2024-01-02'])
 
         builder = MarketContextBuilder(self.db_path)
-        context = builder.build('KRX:005930')
+        context = builder.build('KRX:005930', reference_date=TEST_REFERENCE_DATE)
 
         dp = context.data_points[0]
         assert dp.trade_date == '2024-01-02'
@@ -180,7 +183,7 @@ class TestMarketContextBuilder:
         self._seed_data('KRX:005930', 'TestProvider', ['2024-01-02'])
 
         builder = MarketContextBuilder(self.db_path)
-        context = builder.build('KRX:005930')
+        context = builder.build('KRX:005930', reference_date=TEST_REFERENCE_DATE)
 
         d = context.to_dict()
         assert d['asset_id'] == 'KRX:005930'
@@ -209,3 +212,75 @@ class TestMarketContextBuilder:
         assert builder.has_data('KRX:005930', provider='ProviderA')
         assert not builder.has_data('KRX:005930', provider='ProviderB')
         assert not builder.has_data('KRX:999999')
+
+
+    def test_freshness_recent_data(self):
+        """최신 데이터(7일 이내)는 is_fresh=True."""
+        self._seed_data('KRX:005930', 'TestProvider', ['2024-01-28', '2024-01-29', '2024-01-30', '2024-01-31'])
+
+        builder = MarketContextBuilder(self.db_path)
+        context = builder.build('KRX:005930', reference_date=TEST_REFERENCE_DATE)
+
+        assert context.is_fresh is True
+        assert context.age_days <= 7
+        assert context.last_trade_date == '2024-01-31'
+
+    def test_freshness_old_data(self):
+        """오래된 데이터(7일 초과)는 is_fresh=False."""
+        self._seed_data('KRX:005930', 'TestProvider', ['2024-01-20', '2024-01-21', '2024-01-22'])
+
+        builder = MarketContextBuilder(self.db_path)
+        context = builder.build('KRX:005930', reference_date=TEST_REFERENCE_DATE)
+
+        assert context.is_fresh is False
+        assert context.age_days > 7
+        assert context.last_trade_date == '2024-01-22'
+
+    def test_freshness_boundary_exact_7_days(self):
+        """정확히 7일 경과는 fresh."""
+        # 2024-01-25가 마지막 거래일, 기준일 2024-02-01 -> 7일 차이
+        self._seed_data('KRX:005930', 'TestProvider', ['2024-01-25'])
+
+        builder = MarketContextBuilder(self.db_path)
+        context = builder.build('KRX:005930', reference_date=TEST_REFERENCE_DATE)
+
+        assert context.is_fresh is True
+        assert context.age_days == 7
+
+    def test_freshness_boundary_8_days(self):
+        """8일 경과는 not fresh."""
+        # 2024-01-24가 마지막 거래일, 기준일 2024-02-01 -> 8일 차이
+        self._seed_data('KRX:005930', 'TestProvider', ['2024-01-24'])
+
+        builder = MarketContextBuilder(self.db_path)
+        context = builder.build('KRX:005930', reference_date=TEST_REFERENCE_DATE)
+
+        assert context.is_fresh is False
+        assert context.age_days == 8
+
+    def test_freshness_custom_max_age_days(self):
+        """max_age_days 커스터마이징."""
+        self._seed_data('KRX:005930', 'TestProvider', ['2024-01-28'])
+
+        builder = MarketContextBuilder(self.db_path)
+        # max_age_days=3일로 설정, 기준일 2024-02-01 -> 4일 차이
+        context = builder.build('KRX:005930', max_age_days=3, reference_date=TEST_REFERENCE_DATE)
+
+        assert context.is_fresh is False
+        assert context.age_days == 4
+        # max_age_days=5로 설정
+        context = builder.build('KRX:005930', max_age_days=5, reference_date=TEST_REFERENCE_DATE)
+        assert context.is_fresh is True
+
+    def test_to_dict_includes_freshness(self):
+        """to_dict에 is_fresh, age_days 포함."""
+        self._seed_data('KRX:005930', 'TestProvider', ['2024-01-28'])
+
+        builder = MarketContextBuilder(self.db_path)
+        context = builder.build('KRX:005930', reference_date=TEST_REFERENCE_DATE)
+
+        d = context.to_dict()
+        assert 'is_fresh' in d
+        assert 'age_days' in d
+        assert d['is_fresh'] is True
+        assert d['age_days'] == 4

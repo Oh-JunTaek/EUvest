@@ -288,6 +288,16 @@ class Orchestrator:
                 f"시장 데이터 부족: {count}개 일봉 (최소 20개 필요). 데이터 수집 후 재시도 필요."
             )
 
+        # 데이터 최신성 확인
+        is_fresh = market_data.get("is_fresh", False)
+        age_days = market_data.get("age_days", 999999)
+        if not is_fresh:
+            last_trade = market_data.get("last_trade_date", "알 수 없음")
+            return await self._create_no_trade_decision(
+                thesis, run,
+                f"시장 데이터가 너무 오래됨: 마지막 거래일 {last_trade}로부터 {age_days}일 경과 (허용: 7일 이내). 최신 데이터 수집 필요."
+            )
+
         # AI 라우터를 통해 구조화된 결정 요청
         from invest_agent.ai.protocol import AIRequest
         from invest_agent.ai.router import ProviderRouter

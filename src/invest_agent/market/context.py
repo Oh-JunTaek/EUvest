@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,8 @@ class MarketContext:
     fetched_at: datetime | None         # 데이터 수집 시각 (DB 저장 시점)
     count: int                          # 데이터 포인트 수
     is_sufficient: bool                 # 분석에 충분한 데이터 여부 (기본 20개 이상)
+    is_fresh: bool                      # 데이터 최신성 여부 (기본 7일 이내)
+    age_days: int                       # 마지막 거래일부터 오늘까지 경과 일수
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환 (JSON 직렬화용)."""
@@ -59,6 +61,8 @@ class MarketContext:
             "fetched_at": self.fetched_at.isoformat() if self.fetched_at else None,
             "count": self.count,
             "is_sufficient": self.is_sufficient,
+            "is_fresh": self.is_fresh,
+            "age_days": self.age_days,
         }
 
 
@@ -69,6 +73,7 @@ class MarketContextBuilder:
     """
 
     DEFAULT_LOOKBACK = 20  # 기본 조회 일수
+    DEFAULT_MAX_AGE_DAYS = 7  # 기본 최대 데이터 경과 일수
 
     def __init__(self, db_path: str | Path) -> None:
         """초기화.
@@ -78,11 +83,34 @@ class MarketContextBuilder:
         """
         self.repository = OHLCVRepository(db_path)
 
+    @staticmethod
+    def _calculate_age_days(last_trade_date: str | None, reference_date: datetime | None = None) -> int:
+        """마지막 거래일로부터 경과 일수 계산.
+
+        Args:
+            last_trade_date: 마지막 거래일 (YYYY-MM-DD)
+            reference_date: 기준일 (None이면 현재 UTC 날짜)
+
+        Returns:
+            경과 일수 (데이터 없으면 큰 값 반환)
+        """
+        if not last_trade_date:
+            return 999999
+        if reference_date is None:
+            reference_date = datetime.now(UTC)
+        try:
+            last_date = datetime.fromisoformat(last_trade_date).replace(tzinfo=UTC)
+            return (reference_date.date() - last_date.date()).days
+        except ValueError:
+            return 999999
+
     def build(
         self,
         asset_id: str,
         provider: str | None = None,
         lookback: int = DEFAULT_LOOKBACK,
+        max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+        reference_date: datetime | None = None,
     ) -> MarketContext:
         """시장 컨텍스트 구성.
 
@@ -151,6 +179,14 @@ class MarketContextBuilder:
         # DB에서 fetched_at 조회 (첫 번째 행의 fetched_at 사용)
         fetched_at = self._get_fetched_at(asset_id, selected_provider)
 
+        # 최신성 판정
+        if reference_date is None:
+            ref_date = datetime.now(UTC)
+        else:
+            ref_date = reference_date
+        age_days = self._calculate_age_days(last_trade_date, ref_date)
+        is_fresh = age_days <= max_age_days
+
         return MarketContext(
             asset_id=asset_id,
             market=ohlcv_list[0].market,
@@ -160,6 +196,8 @@ class MarketContextBuilder:
             fetched_at=fetched_at,
             count=len(data_points),
             is_sufficient=len(data_points) >= lookback,
+            is_fresh=is_fresh,
+            age_days=age_days,
         )
 
     def _get_fetched_at(self, asset_id: str, provider: str) -> datetime | None:

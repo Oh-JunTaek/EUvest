@@ -372,7 +372,6 @@ Note: This is historical OHLCV data, not real-time prices. Do not treat as curre
 
     async def _create_no_trade_decision(self, thesis, run, rationale: str):
         """NO_TRADE 결정을 생성하고 저장."""
-        # 타이밍 이슈 방지: FakeProvider의 latency 시뮬레이션과 유사하게 최소 지연 추가
         import asyncio
         from datetime import UTC
         from uuid import uuid4

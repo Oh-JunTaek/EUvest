@@ -112,6 +112,8 @@ class MarketContextBuilder:
         max_age_days: int = DEFAULT_MAX_AGE_DAYS,
         reference_date: datetime | None = None,
     ) -> MarketContext:
+        if max_age_days < 0:
+            raise ValueError("max_age_days는 0 이상이어야 합니다.")
         """시장 컨텍스트 구성.
 
         Args:
@@ -185,7 +187,8 @@ class MarketContextBuilder:
         else:
             ref_date = reference_date
         age_days = self._calculate_age_days(last_trade_date, ref_date)
-        is_fresh = age_days <= max_age_days
+        # 미래 거래일(age_days < 0)은 최신 데이터로 인정하지 않음
+        is_fresh = 0 <= age_days <= max_age_days
 
         return MarketContext(
             asset_id=asset_id,

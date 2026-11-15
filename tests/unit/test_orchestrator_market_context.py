@@ -340,3 +340,74 @@ class TestOrchestratorMarketContextGating:
         assert decision is not None
         assert decision.outcome == DecisionOutcome.NO_TRADE
         assert "asset_filter 없이 실행됨" in decision.rationale
+
+    def test_stale_data_returns_no_trade(self):
+        """오래된 데이터(7일 초과) 시 AI 호출 없이 NO_TRADE."""
+        import asyncio
+
+        # 2024-01-20 데이터는 2024-02-01 기준 12일 경과 (7일 초과)
+        # 충분한 데이터(20일)를 시드
+        dates = [f"2024-01-{d:02d}" for d in range(1, 21)]  # 2024-01-01 ~ 2024-01-20
+        _seed_ohlcv_data(self.db_path, "KRX:005930", "TestProvider", dates)
+
+        thesis, run = self._create_test_setup("KRX:005930")
+
+        envelope = _build_envelope(self.db_path, "KRX:005930", run_id=run.id)
+
+        settings = get_settings()
+        orchestrator = Orchestrator(str(self.db_path), settings=settings)
+
+        async def mock_generate_structured(self, request: AIRequest, schema: dict) -> AIResponse:
+            pytest.fail("AI가 호출되어서는 안 됨")
+
+        async def run_test():
+            with patch("invest_agent.ai.router.ProviderRouter.generate_structured", mock_generate_structured):
+                return await orchestrator._make_decisions(run, envelope)
+
+        decision = asyncio.run(run_test())
+
+        assert decision is not None
+        assert decision.outcome == DecisionOutcome.NO_TRADE
+        assert "시장 데이터가 너무 오래됨" in decision.rationale
+        assert "2024-01-20" in decision.rationale
+
+    def test_future_trade_date_not_fresh(self):
+        """미래 거래일(age_days < 0)은 최신 데이터로 인정하지 않음."""
+        import asyncio
+
+        # 2024-02-05 데이터는 2024-02-01 기준 -4일 (미래)
+        # 20일 데이터를 시드 (2024-01-17 ~ 2024-02-05)
+        dates = []
+        from datetime import datetime, timedelta
+        start = datetime(2024, 1, 17)
+        for i in range(20):
+            d = start + timedelta(days=i)
+            dates.append(d.strftime("%Y-%m-%d"))
+        _seed_ohlcv_data(self.db_path, "KRX:005930", "TestProvider", dates)
+
+        thesis, run = self._create_test_setup("KRX:005930")
+
+        envelope = _build_envelope(self.db_path, "KRX:005930", run_id=run.id)
+
+        settings = get_settings()
+        orchestrator = Orchestrator(str(self.db_path), settings=settings)
+
+        async def mock_generate_structured(self, request: AIRequest, schema: dict) -> AIResponse:
+            pytest.fail("AI가 호출되어서는 안 됨")
+
+        async def run_test():
+            with patch("invest_agent.ai.router.ProviderRouter.generate_structured", mock_generate_structured):
+                return await orchestrator._make_decisions(run, envelope)
+
+        decision = asyncio.run(run_test())
+
+        assert decision is not None
+        assert decision.outcome == DecisionOutcome.NO_TRADE
+        assert "시장 데이터가 너무 오래됨" in decision.rationale
+
+    def test_max_age_days_negative_raises(self):
+        """max_age_days 음수 입력 시 ValueError."""
+        with pytest.raises(ValueError, match="max_age_days는 0 이상이어야 합니다"):
+            ContextBuilder(str(self.db_path), market_lookback=20).market_context_builder.build(
+                "KRX:005930", max_age_days=-1
+            )

@@ -1,0 +1,190 @@
+"""AI 분석용 시장 데이터 컨텍스트 빌더.
+
+저장된 OHLCV를 AI 분석에 활용할 수 있는 구조화된 데이터로 변환한다.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+from invest_agent.market.market_data import Market
+from invest_agent.storage.repositories import OHLCVRepository
+
+
+@dataclass(frozen=True)
+class OHLCVDataPoint:
+    """단일 일봉 데이터 포인트."""
+    trade_date: str          # YYYY-MM-DD
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+
+
+@dataclass(frozen=True)
+class MarketContext:
+    """AI 분석용 시장 컨텍스트."""
+    asset_id: str
+    market: Market
+    provider: str
+    data_points: list[OHLCVDataPoint]   # 최신순 (최신 데이터가 첫 번째)
+    last_trade_date: str | None         # 가장 최근 거래일
+    fetched_at: datetime | None         # 데이터 수집 시각 (DB 저장 시점)
+    count: int                          # 데이터 포인트 수
+    is_sufficient: bool                 # 분석에 충분한 데이터 여부 (기본 20개 이상)
+
+    def to_dict(self) -> dict[str, Any]:
+        """딕셔너리로 변환 (JSON 직렬화용)."""
+        return {
+            "asset_id": self.asset_id,
+            "market": self.market.value,
+            "provider": self.provider,
+            "data_points": [
+                {
+                    "trade_date": dp.trade_date,
+                    "open": str(dp.open),
+                    "high": str(dp.high),
+                    "low": str(dp.low),
+                    "close": str(dp.close),
+                    "volume": dp.volume,
+                }
+                for dp in self.data_points
+            ],
+            "last_trade_date": self.last_trade_date,
+            "fetched_at": self.fetched_at.isoformat() if self.fetched_at else None,
+            "count": self.count,
+            "is_sufficient": self.is_sufficient,
+        }
+
+
+class MarketContextBuilder:
+    """시장 컨텍스트 빌더.
+
+    OHLCVRepository에서 데이터를 읽어 MarketContext를 구성한다.
+    """
+
+    DEFAULT_LOOKBACK = 20  # 기본 조회 일수
+
+    def __init__(self, db_path: str | Path) -> None:
+        """초기화.
+
+        Args:
+            db_path: SQLite DB 경로
+        """
+        self.repository = OHLCVRepository(db_path)
+
+    def build(
+        self,
+        asset_id: str,
+        provider: str | None = None,
+        lookback: int = DEFAULT_LOOKBACK,
+    ) -> MarketContext:
+        """시장 컨텍스트 구성.
+
+        Args:
+            asset_id: 자산 ID (예: "KRX:005930", "US:AAPL")
+            provider: 명시적 공급자 지정 (None이면 단일 공급자만 있을 때 자동 선택)
+            lookback: 조회할 일봉 개수 (기본 20)
+
+        Returns:
+            MarketContext 객체
+
+        Raises:
+            ValueError: 공급자가 여러 개인데 미지정, 또는 데이터 없음
+        """
+        # 저장된 공급자 목록 확인
+        providers = self.repository.get_providers(asset_id)
+
+        if not providers:
+            raise ValueError(f"저장된 데이터가 없습니다: {asset_id}")
+
+        # 공급자 결정
+        if provider is None:
+            if len(providers) > 1:
+                raise ValueError(
+                    f"공급자가 여러 개입니다. 명시적으로 지정하세요: {providers}"
+                )
+            selected_provider = providers[0]
+        else:
+            if provider not in providers:
+                raise ValueError(
+                    f"지정하신 공급자 '{provider}'의 데이터가 없습니다. "
+                    f"사용 가능한 공급자: {providers}"
+                )
+            selected_provider = provider
+
+        # 데이터 조회 (최신순)
+        ohlcv_list = self.repository.get_range(
+            asset_id=asset_id,
+            start_date="1900-01-01",
+            end_date="2100-12-31",
+            provider=selected_provider,
+        )
+
+        # lookback 개수만큼 제한
+        ohlcv_list = ohlcv_list[:lookback]
+
+        if not ohlcv_list:
+            raise ValueError(f"조회된 데이터가 없습니다: {asset_id} ({selected_provider})")
+
+        # 데이터 포인트 변환
+        data_points = [
+            OHLCVDataPoint(
+                trade_date=ohlcv.timestamp.date().isoformat(),
+                open=ohlcv.open,
+                high=ohlcv.high,
+                low=ohlcv.low,
+                close=ohlcv.close,
+                volume=ohlcv.volume,
+            )
+            for ohlcv in ohlcv_list
+        ]
+
+        # 메타데이터 구성
+        last_trade_date = ohlcv_list[0].timestamp.date().isoformat() if ohlcv_list else None
+
+        # DB에서 fetched_at 조회 (첫 번째 행의 fetched_at 사용)
+        fetched_at = self._get_fetched_at(asset_id, selected_provider)
+
+        return MarketContext(
+            asset_id=asset_id,
+            market=ohlcv_list[0].market,
+            provider=selected_provider,
+            data_points=data_points,
+            last_trade_date=last_trade_date,
+            fetched_at=fetched_at,
+            count=len(data_points),
+            is_sufficient=len(data_points) >= lookback,
+        )
+
+    def _get_fetched_at(self, asset_id: str, provider: str) -> datetime | None:
+        """가장 최근 데이터의 fetched_at 조회."""
+        import sqlite3
+
+        with sqlite3.connect(str(self.repository.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT fetched_at FROM ohlcv WHERE asset_id = ? AND provider = ? ORDER BY trade_date DESC LIMIT 1",
+                (asset_id, provider),
+            ).fetchone()
+            if row and row["fetched_at"]:
+                return datetime.fromisoformat(row["fetched_at"])
+            return None
+
+    def get_available_providers(self, asset_id: str) -> list[str]:
+        """자산에 대해 사용 가능한 공급자 목록 반환."""
+        return self.repository.get_providers(asset_id)
+
+    def has_data(self, asset_id: str, provider: str | None = None) -> bool:
+        """데이터 존재 여부 확인."""
+        providers = self.repository.get_providers(asset_id)
+        if not providers:
+            return False
+        if provider is None:
+            return True
+        return provider in providers

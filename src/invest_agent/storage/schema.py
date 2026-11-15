@@ -8,7 +8,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DDL_STATEMENTS = [
     # theses 테이블
@@ -101,6 +101,22 @@ DDL_STATEMENTS = [
         metadata TEXT NOT NULL DEFAULT '{}',
         FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT,
         FOREIGN KEY (decision_id) REFERENCES decisions(id) ON DELETE RESTRICT
+    )
+    """,
+    # ohlcv 테이블 - 일봉 데이터 저장
+    """
+    CREATE TABLE IF NOT EXISTS ohlcv (
+        asset_id TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        open_price TEXT NOT NULL,
+        high_price TEXT NOT NULL,
+        low_price TEXT NOT NULL,
+        close_price TEXT NOT NULL,
+        volume INTEGER NOT NULL,
+        fetched_at TEXT NOT NULL,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (asset_id, trade_date, provider)
     )
     """,
     # handoffs 테이블
@@ -446,6 +462,24 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
     print("Migration v2 -> v3 completed")
 
 
+def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """v3 -> v4 마이그레이션: OHLCV 테이블 추가.
+
+    새 테이블 추가:
+    - ohlcv: 일봉 데이터 저장 (자산ID, 거래일, 공급자별 중복 방지)
+
+    이 테이블은 기존 데이터와 무관하게 새로 생성되므로 단순 생성만 수행.
+    """
+    # ohlcv 테이블 생성
+    for ddl in DDL_STATEMENTS:
+        if 'CREATE TABLE IF NOT EXISTS ohlcv' in ddl:
+            conn.execute(ddl)
+            print("Created ohlcv table")
+            break
+
+    print("Migration v3 -> v4 completed")
+
+
 
 def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
     """마이그레이션 실행 (현재 버전 -> 타겟 버전)."""
@@ -482,6 +516,11 @@ def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
         if current == 2 and target_version >= 3:
             _migrate_v2_to_v3(conn)
             current = 3
+
+        # v3 -> v4
+        if current == 3 and target_version >= 4:
+            _migrate_v3_to_v4(conn)
+            current = 4
 
         conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                      (target_version, datetime.now(UTC).isoformat()))

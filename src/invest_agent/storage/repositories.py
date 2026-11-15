@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
@@ -22,6 +22,7 @@ from invest_agent.domain.models import (
     RunStatus,
     Thesis,
 )
+from invest_agent.market.market_data import OHLCV, Market
 from invest_agent.storage.schema import ensure_db
 
 
@@ -686,4 +687,197 @@ class EquitySnapshotRepository:
             unrealized_pnl=Decimal(row["unrealized_pnl"]),
             realized_pnl=Decimal(row["realized_pnl"]),
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+        )
+
+
+class OHLCVRepository:
+    """OHLCV 일봉 데이터 리포지토리.
+
+    자산 ID, 거래일, 공급자 기준으로 중복 방지하며 저장/조회한다.
+    Decimal 값은 문자열로 저장하여 정밀도 유지.
+    """
+
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
+        ensure_db(self.db_path)
+
+    @contextmanager
+    def _conn(self):
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def save(self, ohlcv: OHLCV, provider: str, fetched_at: datetime | None = None, metadata: dict | None = None) -> None:
+        """단일 OHLCV 저장 (UPSERT)."""
+        if fetched_at is None:
+            fetched_at = datetime.now(UTC)
+
+        trade_date = ohlcv.timestamp.date().isoformat()
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO ohlcv
+                (asset_id, trade_date, provider, open_price, high_price, low_price, close_price, volume, fetched_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(asset_id, trade_date, provider) DO UPDATE SET
+                    open_price=excluded.open_price,
+                    high_price=excluded.high_price,
+                    low_price=excluded.low_price,
+                    close_price=excluded.close_price,
+                    volume=excluded.volume,
+                    fetched_at=excluded.fetched_at,
+                    metadata=excluded.metadata
+                """,
+                (
+                    ohlcv.asset_id,
+                    trade_date,
+                    provider,
+                    str(ohlcv.open),
+                    str(ohlcv.high),
+                    str(ohlcv.low),
+                    str(ohlcv.close),
+                    ohlcv.volume,
+                    fetched_at.isoformat(),
+                    json.dumps(metadata) if metadata else "{}",
+                ),
+            )
+            conn.commit()
+
+    def save_batch(self, ohlcv_list: list[OHLCV], provider: str, fetched_at: datetime | None = None, metadata: dict | None = None) -> int:
+        """OHLCV 리스트를 배치 저장. 저장된 행 수 반환."""
+        if not ohlcv_list:
+            return 0
+
+        if fetched_at is None:
+            fetched_at = datetime.now(UTC)
+
+        saved = 0
+        with self._conn() as conn:
+            for ohlcv in ohlcv_list:
+                trade_date = ohlcv.timestamp.date().isoformat()
+                cursor = conn.execute(
+                    """
+                    INSERT INTO ohlcv
+                    (asset_id, trade_date, provider, open_price, high_price, low_price, close_price, volume, fetched_at, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(asset_id, trade_date, provider) DO UPDATE SET
+                        open_price=excluded.open_price,
+                        high_price=excluded.high_price,
+                        low_price=excluded.low_price,
+                        close_price=excluded.close_price,
+                        volume=excluded.volume,
+                        fetched_at=excluded.fetched_at,
+                        metadata=excluded.metadata
+                    """,
+                    (
+                        ohlcv.asset_id,
+                        trade_date,
+                        provider,
+                        str(ohlcv.open),
+                        str(ohlcv.high),
+                        str(ohlcv.low),
+                        str(ohlcv.close),
+                        ohlcv.volume,
+                        fetched_at.isoformat(),
+                        json.dumps(metadata) if metadata else "{}",
+                    ),
+                )
+                if cursor.rowcount >= 0:
+                    saved += 1
+            conn.commit()
+        return saved
+
+    def get(self, asset_id: str, trade_date: str, provider: str) -> OHLCV | None:
+        """자산 ID, 거래일, 공급자로 단일 OHLCV 조회."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM ohlcv WHERE asset_id = ? AND trade_date = ? AND provider = ?",
+                (asset_id, trade_date, provider),
+            ).fetchone()
+            if not row:
+                return None
+            return self._row_to_ohlcv(row)
+
+    def get_range(self, asset_id: str, start_date: str, end_date: str, provider: str | None = None) -> list[OHLCV]:
+        """날짜 범위로 OHLCV 조회 (최신순)."""
+        with self._conn() as conn:
+            if provider:
+                rows = conn.execute(
+                    "SELECT * FROM ohlcv WHERE asset_id = ? AND trade_date BETWEEN ? AND ? AND provider = ? ORDER BY trade_date DESC",
+                    (asset_id, start_date, end_date, provider),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM ohlcv WHERE asset_id = ? AND trade_date BETWEEN ? AND ? ORDER BY trade_date DESC",
+                    (asset_id, start_date, end_date),
+                ).fetchall()
+            return [self._row_to_ohlcv(row) for row in rows]
+
+    def get_latest(self, asset_id: str, provider: str | None = None) -> OHLCV | None:
+        """최신 OHLCV 조회."""
+        with self._conn() as conn:
+            if provider:
+                row = conn.execute(
+                    "SELECT * FROM ohlcv WHERE asset_id = ? AND provider = ? ORDER BY trade_date DESC LIMIT 1",
+                    (asset_id, provider),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM ohlcv WHERE asset_id = ? ORDER BY trade_date DESC LIMIT 1",
+                    (asset_id,),
+                ).fetchone()
+            if not row:
+                return None
+            return self._row_to_ohlcv(row)
+
+    def get_providers(self, asset_id: str) -> list[str]:
+        """자산에 대해 저장된 공급자 목록 조회."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT provider FROM ohlcv WHERE asset_id = ? ORDER BY provider",
+                (asset_id,),
+            ).fetchall()
+            return [row["provider"] for row in rows]
+
+    def delete(self, asset_id: str, trade_date: str, provider: str) -> bool:
+        """특정 OHLCV 삭제. 삭제된 경우 True 반환."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM ohlcv WHERE asset_id = ? AND trade_date = ? AND provider = ?",
+                (asset_id, trade_date, provider),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def delete_range(self, asset_id: str, start_date: str, end_date: str, provider: str | None = None) -> int:
+        """날짜 범위 내 OHLCV 삭제. 삭제된 행 수 반환."""
+        with self._conn() as conn:
+            if provider:
+                cursor = conn.execute(
+                    "DELETE FROM ohlcv WHERE asset_id = ? AND trade_date BETWEEN ? AND ? AND provider = ?",
+                    (asset_id, start_date, end_date, provider),
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM ohlcv WHERE asset_id = ? AND trade_date BETWEEN ? AND ?",
+                    (asset_id, start_date, end_date),
+                )
+            conn.commit()
+            return cursor.rowcount
+
+    def _row_to_ohlcv(self, row: sqlite3.Row) -> OHLCV:
+        return OHLCV(
+            timestamp=datetime.fromisoformat(row["trade_date"]).replace(tzinfo=UTC),
+            open=Decimal(row["open_price"]),
+            high=Decimal(row["high_price"]),
+            low=Decimal(row["low_price"]),
+            close=Decimal(row["close_price"]),
+            volume=row["volume"],
+            asset_id=row["asset_id"],
+            market=Market.KRX if row["asset_id"].startswith("KRX:") else Market.US,
         )

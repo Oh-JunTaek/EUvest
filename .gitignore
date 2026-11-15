@@ -16,3 +16,4 @@ data/
 KIS*/
 *.pem
 *.key
+*.egg-info/

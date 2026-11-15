@@ -13,6 +13,7 @@ from invest_agent.domain.models import (
     EquitySnapshot,
     OrderRecord,
 )
+from invest_agent.market.context import MarketContextBuilder
 from invest_agent.storage.repositories import (
     AgentRunRepository,
     DecisionRepository,
@@ -71,15 +72,21 @@ class ContextEnvelope:
     available_cash_krw: Decimal = Decimal("0")
     available_cash_usd: Decimal = Decimal("0")
     total_equity: Decimal = Decimal("0")
+    market_context: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 class ContextBuilder:
     """ContextEnvelope 구성기."""
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, market_lookback: int = 20):
+        if market_lookback <= 0:
+            raise ValueError("market_lookback은 1 이상이어야 합니다.")
+        self.db_path = db_path
+        self.market_lookback = market_lookback
         self.thesis_repo = ThesisRepository(db_path)
         self.run_repo = AgentRunRepository(db_path)
         self.decision_repo = DecisionRepository(db_path)
         self.order_repo = OrderRepository(db_path)
         self.snapshot_repo = EquitySnapshotRepository(db_path)
+        self.market_context_builder = MarketContextBuilder(db_path)
 
     def build_context(self, run_id: UUID, max_history: int = 10, asset_filter: list[str] | None = None) -> ContextEnvelope:
         envelope = ContextEnvelope(run_id=run_id)
@@ -88,6 +95,9 @@ class ContextBuilder:
                 theses = self.thesis_repo.get_by_asset(asset_id, active_only=True)
                 for thesis in theses:
                     envelope.active_theses.append(self._to_active_thesis(thesis))
+
+                # 시장 데이터 컨텍스트 구성 (자산별)
+                self._build_market_context(envelope, asset_id)
         else:
             theses = self.thesis_repo.get_all_active()
             for thesis in theses:
@@ -122,6 +132,53 @@ class ContextBuilder:
             is_active=thesis.is_active,
             metadata=thesis.metadata,
         )
+
+    def _build_market_context(self, envelope: ContextEnvelope, asset_id: str) -> None:
+        """자산의 시장 컨텍스트를 구성하여 엔벨로프에 추가.
+
+        Args:
+            envelope: 컨텍스트 엔벨로프
+            asset_id: 자산 ID
+        """
+        try:
+            context = self.market_context_builder.build(
+                asset_id=asset_id,
+                provider=None,  # 명시적 공급자 미지정 - 단일 공급자일 때만 자동 선택
+                lookback=self.market_lookback,
+            )
+            envelope.market_context[asset_id] = {
+                "status": "ok",
+                "data": context.to_dict(),
+            }
+        except ValueError as e:
+            error_msg = str(e)
+            if "공급자가 여러 개입니다" in error_msg:
+                envelope.market_context[asset_id] = {
+                    "status": "provider_conflict",
+                    "error": error_msg,
+                    "available_providers": self.market_context_builder.get_available_providers(asset_id),
+                }
+            elif "저장된 데이터가 없습니다" in error_msg or "조회된 데이터가 없습니다" in error_msg:
+                envelope.market_context[asset_id] = {
+                    "status": "no_data",
+                    "error": error_msg,
+                }
+            elif "지정하신 공급자" in error_msg:
+                envelope.market_context[asset_id] = {
+                    "status": "invalid_provider",
+                    "error": error_msg,
+                    "available_providers": self.market_context_builder.get_available_providers(asset_id),
+                }
+            else:
+                envelope.market_context[asset_id] = {
+                    "status": "error",
+                    "error": error_msg,
+                }
+        except Exception as e:
+            envelope.market_context[asset_id] = {
+                "status": "error",
+                "error": f"예상치 못한 오류: {e}",
+            }
 
     def _build_falsification_conditions(self, active_theses: list[ActiveThesis]) -> list[FalsificationCondition]:
         conditions = []

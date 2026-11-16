@@ -112,24 +112,25 @@ class MarketContextBuilder:
         max_age_days: int = DEFAULT_MAX_AGE_DAYS,
         reference_date: datetime | None = None,
     ) -> MarketContext:
-        if max_age_days < 0:
-            raise ValueError("max_age_days는 0 이상이어야 합니다.")
-        """시장 컨텍스트 구성.
+        """MarketContext 구성.
 
         Args:
-            asset_id: 자산 ID (예: "KRX:005930", "US:AAPL")
-            provider: 명시적 공급자 지정 (None이면 단일 공급자만 있을 때 자동 선택)
+            asset_id: 자산 ID
+            provider: 공급자명 (None이면 단일 공급자일 때 자동 선택)
             lookback: 조회할 일봉 개수 (기본 20)
+            max_age_days: 최대 허용 데이터 경과 일수 (기본 7일)
+            reference_date: 기준일 (None이면 현재 UTC 날짜)
 
         Returns:
             MarketContext 객체
 
         Raises:
-            ValueError: 공급자가 여러 개인데 미지정, 또는 데이터 없음
+            ValueError: 데이터 없음, 공급자 충돌, max_age_days 음수 등
         """
-        # 저장된 공급자 목록 확인
-        providers = self.repository.get_providers(asset_id)
-
+        if max_age_days < 0:
+            raise ValueError("max_age_days는 0 이상이어야 합니다.")
+        # 사용 가능한 공급자 조회
+        providers = self.get_available_providers(asset_id)
         if not providers:
             raise ValueError(f"저장된 데이터가 없습니다: {asset_id}")
 

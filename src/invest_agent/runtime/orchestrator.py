@@ -293,6 +293,7 @@ class Orchestrator:
         age_days = market_data.get("age_days", 999999)
         if not is_fresh:
             last_trade = market_data.get("last_trade_date", "알 수 없음")
+            print(f"DEBUG _make_decisions: stale data detected, age_days={age_days}, last_trade={last_trade}")
             return await self._create_no_trade_decision(
                 thesis, run,
                 f"시장 데이터가 너무 오래됨: 마지막 거래일 {last_trade}로부터 {age_days}일 경과 (허용: 7일 이내). 최신 데이터 수집 필요."
@@ -400,9 +401,11 @@ Note: This is historical OHLCV data, not real-time prices. Do not treat as curre
             execution_mode=self.settings.execution.mode.value,
             decided_at=datetime.now(UTC),
         )
+        print(f"DEBUG _create_no_trade_decision: saving decision with run_id={run.id}, rationale={rationale[:50]}")
         self.decision_repo.save(decision)
         run.decision_ids.append(decision.id)
         self.run_repo.save(run)
+        print(f"DEBUG _create_no_trade_decision: decision saved with id={decision.id}")
         return decision
 
     def _validate_risk(

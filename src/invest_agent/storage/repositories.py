@@ -275,6 +275,21 @@ class DecisionRepository:
             ).fetchall()
             return [self._row_to_decision(row) for row in rows]
 
+    def get_by_asset(self, asset_id: str, limit: int = 50) -> list[Decision]:
+        """자산 ID로 의사결정 조회 (thesis join 필요)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT d.* FROM decisions d
+                JOIN theses t ON d.thesis_id = t.id
+                WHERE t.asset_id = ?
+                ORDER BY d.decided_at DESC
+                LIMIT ?
+                """,
+                (asset_id, limit),
+            ).fetchall()
+            return [self._row_to_decision(row) for row in rows]
+
     def _row_to_decision(self, row: sqlite3.Row) -> Decision:
         return Decision(
             id=UUID(row["id"]),

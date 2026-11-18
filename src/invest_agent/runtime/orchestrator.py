@@ -370,6 +370,44 @@ class Orchestrator:
         if indicators_calculated_at:
             indicators_text += f"  Calculated at: {indicators_calculated_at} (using {indicators_data_points} data points)\n"
 
+        # 투자 이력 추출 (현재 자산만)
+        history = envelope.asset_decision_history.get(asset_id, [])
+        history_text = "Investment History (most recent first, max 5):\n"
+        if history:
+            for i, h in enumerate(history, 1):
+                side_str = f" {h.side}" if h.side else ""
+                target_str = f", target={h.target_weight_bps}bps" if h.target_weight_bps else ""
+                current_str = f", current={h.current_weight_bps}bps" if h.current_weight_bps else ""
+                date_str = h.decided_at.strftime("%Y-%m-%d %H:%M") if h.decided_at else "unknown"
+                history_text += f"  {i}. {date_str} | {h.outcome}{side_str}{target_str}{current_str} | {h.rationale[:120]}\n"
+        else:
+            history_text += "  No previous decisions for this asset.\n"
+
+        # 기각 조건 추출 (현재 가설만)
+        falsification_text = "Falsification Conditions (from thesis metadata):\n"
+        thesis_falsifications = [fc for fc in envelope.falsification_conditions if fc.thesis_id == thesis.thesis_id]
+        if thesis_falsifications:
+            for fc in thesis_falsifications:
+                threshold_str = f", threshold={fc.threshold_value}" if fc.threshold_value is not None else ""
+                falsification_text += f"  - {fc.condition_type}: {fc.description}{threshold_str}\n"
+        else:
+            falsification_text += "  No explicit falsification conditions defined.\n"
+
+        # 포트폴리오 스냅샷
+        portfolio_text = "Portfolio Snapshot:\n"
+        if envelope.latest_snapshot:
+            portfolio_text += f"  Total Equity: {envelope.total_equity:,} KRW\n"
+            portfolio_text += f"  Available Cash (KRW): {envelope.available_cash_krw:,}\n"
+            portfolio_text += f"  Available Cash (USD): {envelope.available_cash_usd:,}\n"
+            if hasattr(envelope.latest_snapshot, 'positions') and envelope.latest_snapshot.positions:
+                for aid, pos in envelope.latest_snapshot.positions.items():
+                    if aid != "CASH_KRW" and aid != "CASH_USD":
+                        qty = pos.get("quantity", 0)
+                        if qty:
+                            portfolio_text += f"  Holding {aid}: {qty}\n"
+        else:
+            portfolio_text += "  No portfolio snapshot available.\n"
+
         market_context_text = f"""Market Context for {asset_id}:
 Provider: {provider}
 Last Trade Date: {last_trade_date}
@@ -380,7 +418,14 @@ Recent Bars (newest first):
 
 {indicators_text}
 
+{history_text}
+
+{falsification_text}
+
+{portfolio_text}
+
 Note: This is historical OHLCV data, not real-time prices. Technical indicators are calculated from stored OHLCV and are for reference only, not definitive buy/sell signals.
+Previous decisions are for reference only and do not imply commitment. Changing decisions requires justification. Past history does not guarantee future performance. Insufficient information warrants NO_TRADE.
 """
 
         request = AIRequest(

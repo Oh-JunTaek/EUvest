@@ -60,6 +60,17 @@ class RecentHistoryEntry:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass(slots=True)
+class DecisionHistoryEntry:
+    """자산별 과거 의사결정 이력."""
+    decided_at: datetime
+    outcome: str
+    side: str | None
+    target_weight_bps: int | None
+    current_weight_bps: int | None
+    rationale: str
+
+
+@dataclass(slots=True)
 class ContextEnvelope:
     """투자 판단용 컨텍스트 엔벨로프."""
     run_id: UUID
@@ -67,6 +78,8 @@ class ContextEnvelope:
     active_theses: list[ActiveThesis] = field(default_factory=list)
     falsification_conditions: list[FalsificationCondition] = field(default_factory=list)
     recent_history: list[RecentHistoryEntry] = field(default_factory=list)
+    # 자산별 과거 의사결정 이력 (최대 5건)
+    asset_decision_history: dict[str, list[DecisionHistoryEntry]] = field(default_factory=dict)
     latest_snapshot: EquitySnapshot | None = None
     open_orders: list[OrderRecord] = field(default_factory=list)
     available_cash_krw: Decimal = Decimal("0")
@@ -96,11 +109,16 @@ class ContextBuilder:
 
     def build_context(self, run_id: UUID, max_history: int = 10, asset_filter: list[str] | None = None) -> ContextEnvelope:
         envelope = ContextEnvelope(run_id=run_id)
+        target_assets = asset_filter if asset_filter else []
+
         if asset_filter:
             for asset_id in asset_filter:
                 theses = self.thesis_repo.get_by_asset(asset_id, active_only=True)
                 for thesis in theses:
                     envelope.active_theses.append(self._to_active_thesis(thesis))
+                    # 활성 가설의 자산도 대상에 추가
+                    if thesis.asset_id not in target_assets:
+                        target_assets.append(thesis.asset_id)
 
                 # 시장 데이터 컨텍스트 구성 (자산별)
                 self._build_market_context(envelope, asset_id)
@@ -108,11 +126,29 @@ class ContextBuilder:
             theses = self.thesis_repo.get_all_active()
             for thesis in theses:
                 envelope.active_theses.append(self._to_active_thesis(thesis))
+                if thesis.asset_id not in target_assets:
+                    target_assets.append(thesis.asset_id)
 
         envelope.falsification_conditions = self._build_falsification_conditions(envelope.active_theses)
         envelope.recent_history = self._build_recent_history(max_history)
         envelope.latest_snapshot = self._get_latest_snapshot()
         envelope.open_orders = self._get_open_orders()
+
+        # 자산별 과거 의사결정 이력 구성 (최대 5건)
+        for asset_id in target_assets:
+            decisions = self.decision_repo.get_by_asset(asset_id, limit=5)
+            if decisions:
+                envelope.asset_decision_history[asset_id] = [
+                    DecisionHistoryEntry(
+                        decided_at=d.decided_at,
+                        outcome=d.outcome.value,
+                        side=d.side.value if d.side else None,
+                        target_weight_bps=d.target_weight_bps,
+                        current_weight_bps=d.current_weight_bps,
+                        rationale=d.rationale,
+                    )
+                    for d in decisions
+                ]
 
         if envelope.latest_snapshot:
             envelope.available_cash_krw = envelope.latest_snapshot.cash_balance
@@ -124,6 +160,7 @@ class ContextBuilder:
             "falsification_condition_count": len(envelope.falsification_conditions),
             "recent_runs_count": len(envelope.recent_history),
             "open_orders_count": len(envelope.open_orders),
+            "assets_with_history": list(envelope.asset_decision_history.keys()),
         }
         return envelope
 

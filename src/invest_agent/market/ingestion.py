@@ -181,11 +181,15 @@ class OHLCVIngestionService:
         market: Market,
         max_age_days: int = 7,
         lookback: int = 20,
+        reference_date: datetime | None = None,
     ) -> RefreshResult:
         """필요 시 시장 데이터 자동 갱신.
 
         데이터가 없거나 오래된 경우(마지막 거래일로부터 max_age_days 초과) FDR로 갱신한다.
         이미 최신 데이터가 충분하면 갱신을 생략한다.
+
+        Args:
+            reference_date: 기준일 (None이면 현재 UTC). 테스트용 고정 기준일 지정 가능.
 
         Args:
             asset_id: 자산 ID (예: "KRX:005930", "US:AAPL")
@@ -204,16 +208,27 @@ class OHLCVIngestionService:
                 asset_id=asset_id,
                 lookback=lookback,
                 max_age_days=max_age_days,
+                reference_date=reference_date,
             )
-        except ValueError:
+        except ValueError as e:
+            # 공급자 충돌 등 명확한 오류인 경우
+            if "공급자가 여러 개" in str(e):
+                return RefreshResult(
+                    asset_id=asset_id,
+                    market=market,
+                    action="error",
+                    error=f"공급자 충돌: {e}. 명시적으로 공급자를 지정하세요.",
+                )
             # 데이터가 없음
             context = None
 
         # 데이터가 없거나 오래됐는지 확인
         if context is None:
-            pass  # refresh needed
+            pass  # refresh needed: 데이터 없음
         elif not context.is_fresh:
-            pass  # refresh needed
+            pass  # refresh needed: 데이터 오래됨
+        elif not context.is_sufficient:
+            pass  # refresh needed: 데이터는 최신이지만 개수 부족
         else:
             # 데이터가 최신이고 충분하면 스킵
             return RefreshResult(
@@ -227,10 +242,11 @@ class OHLCVIngestionService:
                 is_sufficient=context.is_sufficient,
             )
 
-        # 데이터 갱신 필요 - 끝날짜는 오늘, 시작일은 lookback일 전으로 설정
+        # 데이터 갱신 필요 - 끝날짜는 기준일, 시작일은 lookback+max_age_days+5일 전으로 설정
         from datetime import UTC, datetime, timedelta
-        end_date = datetime.now(UTC).date().isoformat()
-        start_date = (datetime.now(UTC).date() - timedelta(days=lookback + max_age_days + 5)).isoformat()
+        ref = reference_date or datetime.now(UTC)
+        end_date = ref.date().isoformat()
+        start_date = (ref.date() - timedelta(days=lookback + max_age_days + 5)).isoformat()
 
         try:
             ingestion_result = self.ingest(asset_id, market, start_date, end_date)
@@ -259,7 +275,21 @@ class OHLCVIngestionService:
                     asset_id=asset_id,
                     lookback=lookback,
                     max_age_days=max_age_days,
+                    reference_date=reference_date,
                 )
+                # 갱신 후에도 최신이거나 충분하지 않으면 오류
+                if not updated_context.is_fresh or not updated_context.is_sufficient:
+                    return RefreshResult(
+                        asset_id=asset_id,
+                        market=market,
+                        action="error",
+                        provider=updated_context.provider,
+                        error=f"갱신 후에도 데이터가 최신이거나 충분하지 않습니다. (fresh={updated_context.is_fresh}, sufficient={updated_context.is_sufficient}, age_days={updated_context.age_days}, count={updated_context.count})",
+                        last_trade_date=updated_context.last_trade_date,
+                        age_days=updated_context.age_days,
+                        is_fresh=updated_context.is_fresh,
+                        is_sufficient=updated_context.is_sufficient,
+                    )
                 return RefreshResult(
                     asset_id=asset_id,
                     market=market,
@@ -272,12 +302,14 @@ class OHLCVIngestionService:
                     is_fresh=updated_context.is_fresh,
                     is_sufficient=updated_context.is_sufficient,
                 )
-            except ValueError:
+            except ValueError as e:
+                # 갱신 후에도 데이터 조회 실패
                 return RefreshResult(
                     asset_id=asset_id,
                     market=market,
-                    action="refreshed",
+                    action="error",
                     provider=ingestion_result.provider,
+                    error=f"갱신 후 데이터 조회 실패: {e}",
                     fetched_count=ingestion_result.fetched_count,
                     saved_count=ingestion_result.saved_count,
                 )

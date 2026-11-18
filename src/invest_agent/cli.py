@@ -670,7 +670,7 @@ def market_refresh(
         console.print(f"  Fresh: {result.is_fresh}")
         console.print(f"  Sufficient: {result.is_sufficient}")
     else:  # error
-        console.print("\n[red]Refresh failed: {result.error}[/red]")
+        console.print(f"\n[red]Refresh failed: {result.error}[/red]")
         raise typer.Exit(1)
 
 if __name__ == "__main__":

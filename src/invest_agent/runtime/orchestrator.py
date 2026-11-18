@@ -330,6 +330,46 @@ class Orchestrator:
             for bp in recent_bars
         ])
 
+        # 기술적 지표 추출
+        indicators = market_data.get("indicators", {})
+        sma_5 = indicators.get("sma_5")
+        sma_20 = indicators.get("sma_20")
+        ema_20 = indicators.get("ema_20")
+        rsi_14 = indicators.get("rsi_14")
+        bb_upper = indicators.get("bb_upper")
+        bb_middle = indicators.get("bb_middle")
+        bb_lower = indicators.get("bb_lower")
+        bb_bandwidth = indicators.get("bb_bandwidth")
+        indicators_calculated_at = indicators.get("calculated_at")
+        indicators_data_points = indicators.get("data_points")
+
+        indicators_text = "Technical Indicators (latest values):\n"
+        if sma_5 is not None:
+            indicators_text += f"  SMA(5): {sma_5}\n"
+        else:
+            indicators_text += "  SMA(5): N/A (insufficient data)\n"
+        if sma_20 is not None:
+            indicators_text += f"  SMA(20): {sma_20}\n"
+        else:
+            indicators_text += "  SMA(20): N/A (insufficient data)\n"
+        if ema_20 is not None:
+            indicators_text += f"  EMA(20): {ema_20}\n"
+        else:
+            indicators_text += "  EMA(20): N/A (insufficient data)\n"
+        if rsi_14 is not None:
+            indicators_text += f"  RSI(14): {rsi_14}\n"
+        else:
+            indicators_text += "  RSI(14): N/A (insufficient data)\n"
+        if bb_upper is not None and bb_middle is not None and bb_lower is not None:
+            indicators_text += f"  Bollinger Bands(20,2): Upper={bb_upper}, Middle={bb_middle}, Lower={bb_lower}"
+            if bb_bandwidth is not None:
+                indicators_text += f", Bandwidth={bb_bandwidth}"
+            indicators_text += "\n"
+        else:
+            indicators_text += "  Bollinger Bands(20,2): N/A (insufficient data)\n"
+        if indicators_calculated_at:
+            indicators_text += f"  Calculated at: {indicators_calculated_at} (using {indicators_data_points} data points)\n"
+
         market_context_text = f"""Market Context for {asset_id}:
 Provider: {provider}
 Last Trade Date: {last_trade_date}
@@ -338,7 +378,9 @@ Total Bars: {market_data.get('count', 0)} (Sufficient: {is_sufficient})
 Recent Bars (newest first):
 {bars_text}
 
-Note: This is historical OHLCV data, not real-time prices. Do not treat as current market prices.
+{indicators_text}
+
+Note: This is historical OHLCV data, not real-time prices. Technical indicators are calculated from stored OHLCV and are for reference only, not definitive buy/sell signals.
 """
 
         request = AIRequest(

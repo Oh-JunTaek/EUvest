@@ -11,6 +11,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from invest_agent.market.indicators import (
+    calculate_bollinger_bands,
+    calculate_ema,
+    calculate_rsi,
+    calculate_sma,
+)
 from invest_agent.market.market_data import Market
 from invest_agent.storage.repositories import OHLCVRepository
 
@@ -40,6 +46,20 @@ class MarketContext:
     is_fresh: bool                      # 데이터 최신성 여부 (기본 7일 이내)
     age_days: int                       # 마지막 거래일부터 오늘까지 경과 일수
 
+    # 기술적 지표 (최신 값, 계산 불가능 시 None)
+    sma_5: Decimal | None = None
+    sma_20: Decimal | None = None
+    ema_20: Decimal | None = None
+    rsi_14: Decimal | None = None
+    bb_upper: Decimal | None = None
+    bb_middle: Decimal | None = None
+    bb_lower: Decimal | None = None
+    bb_bandwidth: Decimal | None = None
+
+    # 지표 계산 메타데이터
+    indicators_calculated_at: datetime | None = None
+    indicators_data_points: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환 (JSON 직렬화용)."""
         return {
@@ -63,6 +83,19 @@ class MarketContext:
             "is_sufficient": self.is_sufficient,
             "is_fresh": self.is_fresh,
             "age_days": self.age_days,
+            # 기술적 지표
+            "indicators": {
+                "sma_5": str(self.sma_5) if self.sma_5 is not None else None,
+                "sma_20": str(self.sma_20) if self.sma_20 is not None else None,
+                "ema_20": str(self.ema_20) if self.ema_20 is not None else None,
+                "rsi_14": str(self.rsi_14) if self.rsi_14 is not None else None,
+                "bb_upper": str(self.bb_upper) if self.bb_upper is not None else None,
+                "bb_middle": str(self.bb_middle) if self.bb_middle is not None else None,
+                "bb_lower": str(self.bb_lower) if self.bb_lower is not None else None,
+                "bb_bandwidth": str(self.bb_bandwidth) if self.bb_bandwidth is not None else None,
+                "calculated_at": self.indicators_calculated_at.isoformat() if self.indicators_calculated_at else None,
+                "data_points": self.indicators_data_points,
+            },
         }
 
 
@@ -191,6 +224,23 @@ class MarketContextBuilder:
         # 미래 거래일(age_days < 0)은 최신 데이터로 인정하지 않음
         is_fresh = 0 <= age_days <= max_age_days
 
+        # 기술적 지표 계산 (과거->최신 순서로 정렬 필요)
+        # data_points는 최신순이므로 뒤집어서 과거->최신으로 만듦
+        close_prices = [dp.close for dp in reversed(data_points)]
+
+        sma_5 = calculate_sma(close_prices, 5) if len(close_prices) >= 5 else None
+        sma_20 = calculate_sma(close_prices, 20) if len(close_prices) >= 20 else None
+        ema_20 = calculate_ema(close_prices, 20) if len(close_prices) >= 20 else None
+        rsi_14 = calculate_rsi(close_prices, 14) if len(close_prices) >= 15 else None
+        bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close_prices, 20, 2) if len(close_prices) >= 20 else (None, None, None)
+
+        bb_bandwidth = None
+        if bb_upper is not None and bb_middle is not None and bb_middle != 0:
+            bb_bandwidth = (bb_upper - bb_lower) / bb_middle
+
+        indicators_calculated_at = datetime.now(UTC)
+        indicators_data_points = len(close_prices)
+
         return MarketContext(
             asset_id=asset_id,
             market=ohlcv_list[0].market,
@@ -202,6 +252,16 @@ class MarketContextBuilder:
             is_sufficient=len(data_points) >= lookback,
             is_fresh=is_fresh,
             age_days=age_days,
+            sma_5=sma_5,
+            sma_20=sma_20,
+            ema_20=ema_20,
+            rsi_14=rsi_14,
+            bb_upper=bb_upper,
+            bb_middle=bb_middle,
+            bb_lower=bb_lower,
+            bb_bandwidth=bb_bandwidth,
+            indicators_calculated_at=indicators_calculated_at,
+            indicators_data_points=indicators_data_points,
         )
 
     def _get_fetched_at(self, asset_id: str, provider: str) -> datetime | None:

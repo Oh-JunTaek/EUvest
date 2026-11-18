@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from invest_agent.market.context import MarketContextBuilder
 from invest_agent.market.fdr_provider import create_fdr_provider
 from invest_agent.market.market_data import Market
 from invest_agent.market.protocol import MarketDataProvider, MarketDataProviderError, OHLCVRequest
@@ -27,6 +28,22 @@ class IngestionResult:
     saved_count: int            # DB에 저장된/업데이트된 행 수
     fetched_at: datetime        # 데이터 수집 시각
     error: str | None = None    # 에러 메시지 (실패 시)
+
+
+@dataclass(frozen=True)
+class RefreshResult:
+    """자동 갱신 결과."""
+    asset_id: str
+    market: Market
+    action: str                 # "refreshed", "skipped", "error"
+    provider: str | None = None
+    fetched_count: int = 0
+    saved_count: int = 0
+    error: str | None = None
+    last_trade_date: str | None = None
+    age_days: int | None = None
+    is_fresh: bool = False
+    is_sufficient: bool = False
 
 
 class OHLCVIngestionService:
@@ -157,3 +174,119 @@ class OHLCVIngestionService:
             result = self.ingest(asset_id, market, start_date, end_date)
             results.append(result)
         return results
+
+    def refresh_if_needed(
+        self,
+        asset_id: str,
+        market: Market,
+        max_age_days: int = 7,
+        lookback: int = 20,
+    ) -> RefreshResult:
+        """필요 시 시장 데이터 자동 갱신.
+
+        데이터가 없거나 오래된 경우(마지막 거래일로부터 max_age_days 초과) FDR로 갱신한다.
+        이미 최신 데이터가 충분하면 갱신을 생략한다.
+
+        Args:
+            asset_id: 자산 ID (예: "KRX:005930", "US:AAPL")
+            market: 시장 (KRX 또는 US)
+            max_age_days: 데이터 최대 경과 일수 (기본 7일)
+            lookback: 분석에 필요한 최소 데이터 개수 (기본 20개)
+
+        Returns:
+            갱신 결과 (action: "refreshed" | "skipped" | "error")
+        """
+        # MarketContextBuilder로 현재 데이터 상태 확인
+        context_builder = MarketContextBuilder(str(self.db_path))
+
+        try:
+            context = context_builder.build(
+                asset_id=asset_id,
+                lookback=lookback,
+                max_age_days=max_age_days,
+            )
+        except ValueError:
+            # 데이터가 없음
+            context = None
+
+        # 데이터가 없거나 오래됐는지 확인
+        if context is None:
+            pass  # refresh needed
+        elif not context.is_fresh:
+            pass  # refresh needed
+        else:
+            # 데이터가 최신이고 충분하면 스킵
+            return RefreshResult(
+                asset_id=asset_id,
+                market=market,
+                action="skipped",
+                provider=context.provider,
+                last_trade_date=context.last_trade_date,
+                age_days=context.age_days,
+                is_fresh=context.is_fresh,
+                is_sufficient=context.is_sufficient,
+            )
+
+        # 데이터 갱신 필요 - 끝날짜는 오늘, 시작일은 lookback일 전으로 설정
+        from datetime import UTC, datetime, timedelta
+        end_date = datetime.now(UTC).date().isoformat()
+        start_date = (datetime.now(UTC).date() - timedelta(days=lookback + max_age_days + 5)).isoformat()
+
+        try:
+            ingestion_result = self.ingest(asset_id, market, start_date, end_date)
+
+            if ingestion_result.error:
+                return RefreshResult(
+                    asset_id=asset_id,
+                    market=market,
+                    action="error",
+                    provider=ingestion_result.provider,
+                    error=ingestion_result.error,
+                )
+
+            if ingestion_result.saved_count == 0:
+                return RefreshResult(
+                    asset_id=asset_id,
+                    market=market,
+                    action="error",
+                    provider=ingestion_result.provider,
+                    error="수집된 데이터가 없거나 저장되지 않았습니다.",
+                )
+
+            # 갱신 후 데이터 상태 재확인
+            try:
+                updated_context = context_builder.build(
+                    asset_id=asset_id,
+                    lookback=lookback,
+                    max_age_days=max_age_days,
+                )
+                return RefreshResult(
+                    asset_id=asset_id,
+                    market=market,
+                    action="refreshed",
+                    provider=updated_context.provider,
+                    fetched_count=ingestion_result.fetched_count,
+                    saved_count=ingestion_result.saved_count,
+                    last_trade_date=updated_context.last_trade_date,
+                    age_days=updated_context.age_days,
+                    is_fresh=updated_context.is_fresh,
+                    is_sufficient=updated_context.is_sufficient,
+                )
+            except ValueError:
+                return RefreshResult(
+                    asset_id=asset_id,
+                    market=market,
+                    action="refreshed",
+                    provider=ingestion_result.provider,
+                    fetched_count=ingestion_result.fetched_count,
+                    saved_count=ingestion_result.saved_count,
+                )
+
+        except Exception as e:
+            return RefreshResult(
+                asset_id=asset_id,
+                market=market,
+                action="error",
+                provider=self.provider.name,
+                error=f"갱신 중 오류 발생: {e}",
+            )

@@ -572,5 +572,106 @@ def market_show(
     console.print(table)
 
 
+
+@market_app.command("refresh")
+def market_refresh(
+    asset: str = typer.Option(
+        ...,
+        "--asset",
+        "-a",
+        help="자산 ID (예: KRX:005930, US:AAPL)",
+    ),
+    max_age_days: int = typer.Option(
+        7,
+        "--max-age-days",
+        help="데이터 최대 경과 일수 (기본값: 7)",
+        min=0,
+        max=365,
+    ),
+    lookback: int = typer.Option(
+        20,
+        "--lookback",
+        help="분석에 필요한 최소 데이터 개수 (기본값: 20)",
+        min=1,
+        max=200,
+    ),
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+) -> None:
+    """시장 데이터 자동 갱신.
+
+    데이터가 없거나 오래된 경우(마지막 거래일로부터 max_age_days 초과) FDR로 갱신합니다.
+    이미 최신 데이터가 충분하면 갱신을 생략합니다.
+
+    예시:
+        uv run invest market refresh --asset KRX:005930
+        uv run invest market refresh --asset US:AAPL --max-age-days 7 --lookback 20
+    """
+    from pathlib import Path
+
+    # 입력 검증
+    try:
+        normalized_asset, market = _parse_asset_id(asset)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    if max_age_days < 0:
+        console.print("[red]max-age-days는 0 이상이어야 합니다.[/red]")
+        raise typer.Exit(1)
+
+    if lookback < 1:
+        console.print("[red]lookback은 1 이상이어야 합니다.[/red]")
+        raise typer.Exit(1)
+
+    # DB 존재 확인
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[blue]Checking market data for {normalized_asset} ({market.value})...[/blue]")
+    console.print(f"  DB: {db_path}")
+    console.print(f"  Max age days: {max_age_days}")
+    console.print(f"  Lookback: {lookback}")
+
+    # 수집 서비스 생성 및 실행
+    from invest_agent.market.ingestion import OHLCVIngestionService
+    ingestion_service = OHLCVIngestionService(db_path)
+
+    console.print("  Checking data freshness...")
+    result = ingestion_service.refresh_if_needed(
+        asset_id=normalized_asset,
+        market=market,
+        max_age_days=max_age_days,
+        lookback=lookback,
+    )
+
+    # 결과 출력
+    if result.action == "skipped":
+        console.print("\n[green]Data is fresh, skipping refresh.[/green]")
+        console.print(f"  Provider: {result.provider}")
+        console.print(f"  Last trade date: {result.last_trade_date}")
+        console.print(f"  Age: {result.age_days} days")
+        console.print(f"  Fresh: {result.is_fresh}")
+        console.print(f"  Sufficient: {result.is_sufficient}")
+    elif result.action == "refreshed":
+        console.print("\n[green]Data refreshed successfully![/green]")
+        console.print(f"  Provider: {result.provider}")
+        console.print(f"  Fetched: {result.fetched_count} rows")
+        console.print(f"  Saved: {result.saved_count} rows")
+        if result.last_trade_date:
+            console.print(f"  Last trade date: {result.last_trade_date}")
+        if result.age_days is not None:
+            console.print(f"  Age: {result.age_days} days")
+        console.print(f"  Fresh: {result.is_fresh}")
+        console.print(f"  Sufficient: {result.is_sufficient}")
+    else:  # error
+        console.print("\n[red]Refresh failed: {result.error}[/red]")
+        raise typer.Exit(1)
+
 if __name__ == "__main__":
     app()

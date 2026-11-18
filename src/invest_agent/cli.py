@@ -2,356 +2,47 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
-from uuid import UUID
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from invest_agent.broker.mock_broker import MockBroker
 from invest_agent.market.ingestion import OHLCVIngestionService
 from invest_agent.market.market_data import Market
-from invest_agent.operations.health import check_health
-from invest_agent.reporting.daily import save_daily_report
-from invest_agent.runtime.orchestrator import create_orchestrator
-from invest_agent.settings import get_settings
-from invest_agent.storage.schema import ensure_db
 
 app = typer.Typer(
     name="invest",
     help="EUvest 투자 에이전트 CLI",
     add_completion=False,
 )
-console = Console()
 
+console = Console(force_terminal=True)
 
-@app.command()
-def run_once(
-    mode: str = typer.Option(
-        "offline-sim",
-        "--mode",
-        "-m",
-        help="실행 모드 (offline-sim, backtest, kis-paper, live)",
-        case_sensitive=False,
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="중복 실행 방지 잠금 무시",
-    ),
-    asset_filter: str | None = typer.Option(
-        None,
-        "--asset-filter",
-        "-a",
-        help="처리할 자산 필터 (쉼표로 구분)",
-    ),
-    db_path: str = typer.Option(
-        "data/agent.db",
-        "--db",
-        "-d",
-        help="SQLite DB 경로",
-    ),
-    config: str | None = typer.Option(
-        None,
-        "--config",
-        "-c",
-        help="설정 파일 경로",
-    ),
-) -> None:
-    """단일 실행 사이클 수행 (run-once)."""
-    import asyncio
-
-    # 설정 로드
-    if config:
-        from invest_agent.settings import load_settings
-        settings = load_settings(config)
-    else:
-        settings = get_settings()
-
-    # 실행 모드 검증
-    from invest_agent.domain.enums import ExecutionMode
-    try:
-        exec_mode = ExecutionMode(mode.upper().replace("-", "_"))
-    except ValueError:
-        console.print(f"[red]Invalid mode: {mode}[/red]")
-        console.print(f"Valid modes: {[m.value for m in ExecutionMode]}")
-        raise typer.Exit(1)
-
-    # 설정의 실행 모드와 일치하는지 확인
-    if settings.execution.mode != exec_mode:
-        console.print(f"[yellow]Warning: Config mode ({settings.execution.mode.value}) differs from CLI mode ({exec_mode.value})[/yellow]")
-
-    # 자산 필터 파싱
-    asset_filter_list = None
-    if asset_filter:
-        asset_filter_list = [a.strip().upper() for a in asset_filter.split(",") if a.strip()]
-
-    # DB 초기화
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    ensure_db(db_path)
-
-    # 오케스트레이터 생성 및 실행
-    orchestrator = create_orchestrator(db_path, settings)
-
-    console.print("[blue]Starting run-once...[/blue]")
-    console.print(f"  Mode: {exec_mode.value}")
-    console.print(f"  DB: {db_path}")
-    console.print(f"  Force: {force}")
-    if asset_filter_list:
-        console.print(f"  Asset filter: {asset_filter_list}")
-
-    try:
-        result = asyncio.run(orchestrator.run_once(
-            asset_filter=asset_filter_list,
-            force=force,
-        ))
-
-        # 결과 출력
-        console.print("\n[green]Run completed![/green]")
-        console.print(f"  Run ID: {result.run_id}")
-        console.print(f"  Status: {result.status.value}")
-        console.print(f"  Decision: {result.decision_outcome.value}")
-        console.print(f"  Orders created: {result.orders_created}")
-        console.print(f"  Orders filled: {result.orders_filled}")
-        if result.error:
-            console.print(f"  Error: {result.error}")
-
-        if result.status.value in ("FAILED", "ERROR", "RECOVERY_REQUIRED"):
-            raise typer.Exit(1)
-
-    except RuntimeError as e:
-        console.print(f"[red]Execution blocked: {e}[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Execution failed: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@app.command()
-def health(
-    db_path: str = typer.Option(
-        "data/agent.db",
-        "--db",
-        "-d",
-        help="SQLite DB 경로",
-    ),
-    config: str | None = typer.Option(
-        None,
-        "--config",
-        "-c",
-        help="설정 파일 경로",
-    ),
-    json_output: bool = typer.Option(
-        False,
-        "--json",
-        "-j",
-        help="JSON 형식으로 출력",
-    ),
-) -> None:
-    """시스템 헬스 체크."""
-    if config:
-        from invest_agent.settings import load_settings
-        settings = load_settings(config)
-    else:
-        settings = get_settings()
-
-    # 브로커 없이 DB만 체크
-    result = check_health(db_path, settings, broker=None)
-
-    if json_output:
-        import json
-        output = {
-            "is_healthy": result.is_healthy,
-            "broker_connected": result.broker_connected,
-            "db_accessible": result.db_accessible,
-            "last_run_status": result.last_run_status,
-            "last_run_at": result.last_run_at.isoformat() if result.last_run_at else None,
-            "error": result.error,
-        }
-        console.print_json(json.dumps(output))
-    else:
-        if result.is_healthy:
-            console.print("[green]✓ System healthy[/green]")
-        else:
-            console.print("[red]✗ System unhealthy[/red]")
-
-        console.print(f"  DB accessible: {'✓' if result.db_accessible else '✗'}")
-        console.print(f"  Broker connected: {'✓' if result.broker_connected else '✗'}")
-        if result.last_run_status:
-            console.print(f"  Last run status: {result.last_run_status}")
-        if result.last_run_at:
-            console.print(f"  Last run at: {result.last_run_at.isoformat()}")
-        if result.error:
-            console.print(f"  Error: {result.error}")
-
-    if not result.is_healthy:
-        raise typer.Exit(1)
-
-
-@app.command()
-def report(
-    date: str | None = typer.Option(
-        None,
-        "--date",
-        help="대상 날짜 (YYYY-MM-DD, 기본값: 오늘)",
-    ),
-    db_path: str = typer.Option(
-        "data/agent.db",
-        "--db",
-        "-d",
-        help="SQLite DB 경로",
-    ),
-    output: str | None = typer.Option(
-        None,
-        "--output",
-        "-o",
-        help="출력 파일 경로",
-    ),
-    config: str | None = typer.Option(
-        None,
-        "--config",
-        "-c",
-        help="설정 파일 경로",
-    ),
-) -> None:
-    """일일 리포트 생성 및 저장."""
-    from datetime import UTC, datetime
-
-    if config:
-        from invest_agent.settings import load_settings
-        load_settings(config)
-    else:
-        get_settings()
-
-    target_date = None
-    if date:
-        try:
-            target_date = datetime.fromisoformat(date).replace(tzinfo=UTC)
-        except ValueError:
-            console.print(f"[red]Invalid date format: {date}. Use YYYY-MM-DD[/red]")
-            raise typer.Exit(1)
-
-    try:
-        saved_path = save_daily_report(db_path, target_date, output)
-        console.print(f"[green]Daily report saved to: {saved_path}[/green]")
-    except Exception as e:
-        console.print(f"[red]Failed to generate report: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@app.command()
-def status(
-    run_id: str | None = typer.Option(
-        None,
-        "--run-id",
-        "-r",
-        help="특정 실행 ID 조회",
-    ),
-    db_path: str = typer.Option(
-        "data/agent.db",
-        "--db",
-        "-d",
-        help="SQLite DB 경로",
-    ),
-    limit: int = typer.Option(
-        10,
-        "--limit",
-        "-l",
-        help="최근 실행 기록 조회 개수",
-    ),
-) -> None:
-    """실행 상태 조회."""
-    from invest_agent.storage.repositories import AgentRunRepository
-
-    ensure_db(db_path)
-    run_repo = AgentRunRepository(db_path)
-
-    if run_id:
-        run = run_repo.get(UUID(run_id))
-        if not run:
-            console.print(f"[red]Run not found: {run_id}[/red]")
-            raise typer.Exit(1)
-        _print_run(run)
-    else:
-        runs = run_repo.get_latest(limit)
-        if not runs:
-            console.print("[yellow]No runs found[/yellow]")
-            return
-
-        table = Table(title=f"Latest {len(runs)} Runs")
-        table.add_column("Run ID", style="cyan")
-        table.add_column("Started", style="dim")
-        table.add_column("Status", style="bold")
-        table.add_column("Mode")
-        table.add_column("Decisions")
-        table.add_column("Orders")
-        table.add_column("Error")
-
-        for run in runs:
-            started = run.started_at.strftime("%Y-%m-%d %H:%M:%S")
-            status_style = _get_status_style(run.status.value)
-            table.add_row(
-                str(run.id)[:8] + "...",
-                started,
-                f"[{status_style}]{run.status.value}[/{status_style}]",
-                run.execution_mode,
-                str(len(run.decision_ids)),
-                str(len(run.order_ids)),
-                run.error[:30] + "..." if run.error and len(run.error) > 30 else (run.error or "-"),
-            )
-
-        console.print(table)
-
-
-def _get_status_style(status: str) -> str:
-    """상태별 스타일 반환."""
-    if status == "COMPLETED":
-        return "green"
-    elif status in ("BLOCKED", "SKIPPED_ALREADY_RUNNING"):
-        return "yellow"
-    elif status in ("RECOVERY_REQUIRED", "ERROR"):
-        return "red"
-    return "blue"
-
-
-def _print_run(run) -> None:
-    """단일 실행 상세 출력."""
-    from rich.panel import Panel
-
-    lines = [
-        f"Run ID: {run.id}",
-        f"Started: {run.started_at.isoformat()}",
-        f"Completed: {run.completed_at.isoformat() if run.completed_at else 'N/A'}",
-        f"Status: {run.status.value}",
-        f"Mode: {run.execution_mode}",
-        f"Theses: {len(run.thesis_ids)}",
-        f"Decisions: {len(run.decision_ids)}",
-        f"Orders: {len(run.order_ids)}",
-    ]
-    if run.error:
-        lines.append(f"Error: {run.error}")
-
-    console.print(Panel("\n".join(lines), title="Run Details", border_style="blue"))
-
-
-# === Market Command Group ===
+# Portfolio app
+market_app = typer.Typer(name="market", help="시장 데이터 수집 및 조회")
+app.add_typer(market_app)
 
 market_app = typer.Typer(name="market", help="시장 데이터 수집 및 조회")
 app.add_typer(market_app)
+
+portfolio_app = typer.Typer(name="portfolio", help="포트폴리오 현황 및 손익 조회")
+app.add_typer(portfolio_app)
 
 
 def _parse_asset_id(asset_id: str) -> tuple[str, Market]:
     """자산 ID에서 시장 판별.
 
     Args:
-        asset_id: 자산 ID (예: "KRX:005930", "US:AAPL")
+        asset_id: 자산 ID (예: \"KRX:005930\", \"US:AAPL\")
 
     Returns:
         (정규화된 자산 ID, 시장)
 
     Raises:
-        ValueError: 지원하지 않는 시장 형식
+        ValueError: 지원하지 않는 자산 ID 형식
     """
     asset_id = asset_id.strip().upper()
     if asset_id.startswith("KRX:"):
@@ -361,103 +52,8 @@ def _parse_asset_id(asset_id: str) -> tuple[str, Market]:
     else:
         raise ValueError(
             f"지원하지 않는 자산 ID 형식: {asset_id}. "
-            f"KRX:종목코드 또는 US:심볼 형식으로 입력하세요."
+            f"KRX:종목코드 또는 US:티커 형식으로 입력하세요."
         )
-
-
-def _validate_date(date_str: str) -> str:
-    """날짜 형식 검증 (YYYY-MM-DD).
-
-    Args:
-        date_str: 날짜 문자열
-
-    Returns:
-        검증된 날짜 문자열
-
-    Raises:
-        ValueError: 잘못된 날짜 형식
-    """
-    from datetime import datetime
-
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-        return date_str
-    except ValueError:
-        raise ValueError(f"잘못된 날짜 형식: {date_str}. YYYY-MM-DD 형식으로 입력하세요.")
-
-
-@market_app.command("fetch")
-def market_fetch(
-    asset: str = typer.Option(
-        ...,
-        "--asset",
-        "-a",
-        help="자산 ID (예: KRX:005930, US:AAPL)",
-    ),
-    start: str = typer.Option(
-        ...,
-        "--start",
-        "-s",
-        help="시작일 (YYYY-MM-DD)",
-    ),
-    end: str = typer.Option(
-        ...,
-        "--end",
-        "-e",
-        help="종료일 (YYYY-MM-DD)",
-    ),
-    db_path: str = typer.Option(
-        "data/agent.db",
-        "--db",
-        "-d",
-        help="SQLite DB 경로",
-    ),
-) -> None:
-    """OHLCV 일봉 데이터 수집 및 저장.
-
-    FDR(FinanceDataReader)을 통해 일봉을 조회하고 SQLite에 저장합니다.
-
-    예시:
-        uv run invest market fetch --asset KRX:005930 --start 2024-01-01 --end 2024-01-31
-        uv run invest market fetch --asset US:AAPL --start 2024-01-01 --end 2024-01-31
-    """
-    from pathlib import Path
-
-    # 입력 검증
-    try:
-        normalized_asset, market = _parse_asset_id(asset)
-        start_date = _validate_date(start)
-        end_date = _validate_date(end)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        raise typer.Exit(1)
-
-    if start_date > end_date:
-        console.print("[red]시작일이 종료일보다 늦을 수 없습니다.[/red]")
-        raise typer.Exit(1)
-
-    # DB 초기화
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    ensure_db(db_path)
-
-    console.print(f"[blue]Fetching OHLCV for {normalized_asset} ({market.value})...[/blue]")
-    console.print(f"  Period: {start_date} ~ {end_date}")
-    console.print(f"  DB: {db_path}")
-
-    # 수집 서비스 실행
-    service = OHLCVIngestionService(db_path)
-    result = service.ingest(normalized_asset, market, start_date, end_date)
-
-    # 결과 출력
-    if result.error:
-        console.print(f"[red]Failed: {result.error}[/red]")
-        raise typer.Exit(1)
-
-    console.print("[green]Success![/green]")
-    console.print(f"  Provider: {result.provider}")
-    console.print(f"  Fetched: {result.fetched_count} rows")
-    console.print(f"  Saved:   {result.saved_count} rows")
-    console.print(f"  Fetched at: {result.fetched_at.isoformat()}")
 
 
 @market_app.command("show")
@@ -491,6 +87,7 @@ def market_show(
         uv run invest market show --asset KRX:005930
         uv run invest market show --asset US:AAPL --limit 10
     """
+
     from pathlib import Path
 
     from invest_agent.storage.repositories import OHLCVRepository
@@ -572,6 +169,111 @@ def market_show(
     console.print(table)
 
 
+@portfolio_app.command("show")
+def portfolio_show(
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+) -> None:
+    """OFFLINE_SIM 포트폴리오 현황 및 손익 조회.
+
+    MockBroker 계좌의 현금, 보유 종목, 평가액, 미실현 손익을 출력합니다.
+    실시간 시세 조회나 주문 실행은 하지 않습니다.
+
+    예시:
+        uv run invest portfolio show --db data/agent.db
+    """
+
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    # MockBroker 생성 (읽기 전용)
+    broker = MockBroker(db_path=db_path)
+
+    try:
+        balance = broker.get_balance()
+        positions = broker.get_positions()
+    finally:
+        broker.close()
+
+    # 헤더 출력
+    console.print("[bold cyan]OFFLINE_SIM 포트폴리오 현황[/bold cyan]")
+    console.print("기준 통화: KRW")
+    console.print(f"데이터 기준 시각: {balance.updated_at.isoformat() if balance.updated_at else 'N/A'}")
+    console.print("가격/환율 출처: MockBroker 내부 상태 (시뮬레이션용)")
+    console.print()
+
+    # 현금 잔고
+    console.print("[green]현금 잔고[/green]")
+    console.print(f"  KRW 가용 현금: {balance.available_cash:,.0f} KRW")
+    if hasattr(balance, 'cash_usd') and balance.cash_usd:
+        console.print(f"  USD 현금 잔고: {balance.cash_usd:,.2f} USD")
+    else:
+        console.print("  USD 현금 잔고: 확인 불가 (MockBroker 별도 관리)")
+    console.print()
+
+    # 총 평가액
+    console.print("[green]총 포트폴리오 평가액[/green]")
+    console.print(f"  총 평가액: {balance.total_equity:,.0f} KRW")
+    console.print()
+
+    # 보유 종목
+    if positions:
+        console.print(f"[green]보유 종목 ({len(positions)}개)[/green]")
+        table = Table(title="보유 종목 상세")
+        table.add_column("자산 ID", style="cyan")
+        table.add_column("수량", justify="right", style="yellow")
+        table.add_column("평균 매입가", justify="right", style="green")
+        table.add_column("평가가격", justify="right", style="green")
+        table.add_column("평가금액(KRW)", justify="right", style="magenta")
+        table.add_column("미실현 손익(KRW)", justify="right", style="red")
+
+        for pos in positions:
+            asset_id = pos.asset_id
+            qty = pos.quantity
+            avg_price = pos.avg_price
+            curr_price = pos.current_price
+            market_value = pos.market_value
+            unrealized = pos.unrealized_pnl
+            currency = pos.currency
+
+            # 표시용 통화 및 가격
+            price_display = f"{curr_price:,.2f} {currency}"
+            avg_display = f"{avg_price:,.2f} {currency}"
+            mkt_display = f"{market_value:,.0f} KRW"
+            unreal_display = f"{unrealized:,.0f} KRW"
+            if unrealized >= 0:
+                unreal_display = f"[green]{unreal_display}[/green]"
+            else:
+                unreal_display = f"[red]{unreal_display}[/red]"
+
+            table.add_row(asset_id, f"{qty:,.0f}", avg_display, price_display, mkt_display, unreal_display)
+
+        # Capture table output using a recording console
+        print("DEBUG: before table capture", file=sys.stdout)
+        try:
+            table_console = Console(record=True, force_terminal=True, force_interactive=True)
+            table_console.print(table)
+            table_output = table_console.export_text()
+            print(f"DEBUG table_output: {repr(table_output)}", file=sys.stdout)
+            print(table_output, file=sys.stdout)
+            print(f"DEBUG positions count: {len(positions)}", file=sys.stdout)
+            print("DEBUG: after table print", file=sys.stdout)
+        except Exception as e:
+            print(f"DEBUG: exception in table capture: {e}", file=sys.stdout)
+            import traceback
+            traceback.print_exc(file=sys.stdout)
+    else:
+        console.print("[yellow]보유 종목 없음[/yellow]")
+
+    console.print()
+    console.print("[dim]참고: 이는 OFFLINE_SIM 시뮬레이션 평가액입니다. 실계좌 평가액과 다릅니다.[/dim]")
+    console.print("[dim]미실현 손익만 표시되며, 실현 손익은 별도 거래 내역에서 확인하세요.[/dim]")
+    console.print("[dim]누적 수익률, TWR, XIRR, MDD 등은 입출금 기록이 불충분해 계산하지 않습니다.[/dim]")
 
 @market_app.command("refresh")
 def market_refresh(
@@ -611,7 +313,6 @@ def market_refresh(
         uv run invest market refresh --asset KRX:005930
         uv run invest market refresh --asset US:AAPL --max-age-days 7 --lookback 20
     """
-    from pathlib import Path
 
     # 입력 검증
     try:
@@ -639,7 +340,6 @@ def market_refresh(
     console.print(f"  Lookback: {lookback}")
 
     # 수집 서비스 생성 및 실행
-    from invest_agent.market.ingestion import OHLCVIngestionService
     ingestion_service = OHLCVIngestionService(db_path)
 
     console.print("  Checking data freshness...")

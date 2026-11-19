@@ -709,44 +709,69 @@ def portfolio_show(
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # KRW 현금 조회
-    row = cursor.execute(
-        "SELECT cash_krw FROM mock_account WHERE id = 'default'"
+    # 계좌 정보 조회 (환율, 갱신 시각 포함)
+    account_row = cursor.execute(
+        "SELECT cash_krw, cash_usd, fx_rate_usd_krw, updated_at "
+        "FROM mock_account WHERE id = 'default'"
     ).fetchone()
-    cash_krw = Decimal(row["cash_krw"]) if row else Decimal("0")
 
-    # USD 현금 조회
-    row = cursor.execute(
-        "SELECT cash_usd FROM mock_account WHERE id = 'default'"
-    ).fetchone()
-    cash_usd = Decimal(row["cash_usd"]) if row else None
+    if not account_row:
+        conn.close()
+        console.print("[red]mock_account 레코드가 없습니다: default[/red]")
+        raise typer.Exit(1)
 
-    # 포지션 조회
+    cash_krw = Decimal(account_row["cash_krw"])
+    cash_usd = Decimal(account_row["cash_usd"])
+    fx_rate = Decimal(account_row["fx_rate_usd_krw"])
+    db_updated_at = account_row["updated_at"]
+
+    # 포지션 조회 (실제 테이블명: mock_positions)
     positions = cursor.execute(
         "SELECT asset_id, quantity, avg_price, current_price, currency "
-        "FROM mock_position WHERE quantity > 0"
+        "FROM mock_positions WHERE quantity > 0"
     ).fetchall()
 
     conn.close()
 
+    # 조회 시각
+    query_time = datetime.now(UTC).isoformat()
+
     # 헤더 출력
     console.print("[bold cyan]OFFLINE_SIM 포트폴리오 현황[/bold cyan]")
     console.print("기준 통화: KRW")
-    console.print(f"데이터 기준 시각: {datetime.now(UTC).isoformat()}")
+    console.print(f"조회 시각: {query_time}")
+    if db_updated_at:
+        console.print(f"DB 갱신 시각: {db_updated_at}")
+    console.print(f"적용 환율: 1 USD = {fx_rate:,.0f} KRW (DB 저장값)")
     console.print("가격/환율 출처: MockBroker 내부 상태 (시뮬레이션용)")
     console.print()
 
     # 현금 잔고
     console.print("[green]현금 잔고[/green]")
     console.print(f"  KRW 가용 현금: {cash_krw:,.0f} KRW")
-    if cash_usd is not None and cash_usd > 0:
-        console.print(f"  USD 현금 잔고: {cash_usd:,.2f} USD")
+    if cash_usd == 0:
+        console.print("  USD 현금 잔고: 0.00 USD")
     else:
-        console.print("  USD 현금 잔고: 미확인 (MockBroker 별도 관리)")
+        console.print(f"  USD 현금 잔고: {cash_usd:,.2f} USD")
     console.print()
 
-    # 총 평가액 계산
+    # 총 평가액 계산 - 확인된 값만 합산
     total_equity = cash_krw
+    equity_complete = True
+    equity_parts = []
+
+    # KRW 현금
+    equity_parts.append(("KRW 현금", cash_krw))
+
+    # USD 현금 환산
+    if cash_usd is not None:
+        usd_krw = cash_usd * fx_rate
+        total_equity += usd_krw
+        equity_parts.append((f"USD 현금 ({fx_rate:,.0f} KRW/USD)", usd_krw))
+    else:
+        equity_complete = False
+        equity_parts.append(("USD 현금", None))
+
     position_data = []
 
     for pos in positions:
@@ -758,17 +783,20 @@ def portfolio_show(
 
         market_value = qty * curr_price
         if currency == "USD":
-            market_value_krw = market_value * Decimal("1300")  # 기본 환율
+            market_value_krw = market_value * fx_rate
+            currency_label = f"USD ({fx_rate:,.0f} KRW/USD)"
         else:
             market_value_krw = market_value
+            currency_label = "KRW"
 
         unrealized = qty * (curr_price - avg_price)
         if currency == "USD":
-            unrealized_krw = unrealized * Decimal("1300")
+            unrealized_krw = unrealized * fx_rate
         else:
             unrealized_krw = unrealized
 
         total_equity += market_value_krw
+        equity_parts.append((f"{asset_id} 평가액 ({currency_label})", market_value_krw))
 
         # 표시용 통화 및 가격
         price_display = f"{curr_price:,.2f} {currency}"
@@ -787,11 +815,21 @@ def portfolio_show(
             "price_display": price_display,
             "mkt_display": mkt_display,
             "unreal_display": unreal_display,
+            "currency": currency,
         })
 
-    # 총 평가액
+    # 총 평가액 출력
     console.print("[green]총 포트폴리오 평가액[/green]")
-    console.print(f"  총 평가액: {total_equity:,.0f} KRW")
+    for label, value in equity_parts:
+        if value is not None:
+            console.print(f"  {label}: {value:,.0f} KRW")
+        else:
+            console.print(f"  {label}: 미확인")
+
+    if equity_complete:
+        console.print(f"  [bold]총 평가액: {total_equity:,.0f} KRW[/bold]")
+    else:
+        console.print(f"  [yellow]총 평가액: {total_equity:,.0f} KRW (일부 항목 미확인, 불완전)[/yellow]")
     console.print()
 
     # 보유 종목

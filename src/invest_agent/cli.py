@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -10,6 +11,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from invest_agent.broker.mock_broker import MockBroker
+from invest_agent.domain.models import CashFlowType
 from invest_agent.market.ingestion import OHLCVIngestionService
 from invest_agent.market.market_data import Market
 from invest_agent.operations.health import check_health
@@ -1054,6 +1057,245 @@ def portfolio_history(
     console.print("[dim]참고: 변화액은 단순 평가액 차이입니다. 입출금이 반영되지 않았으므로 투자 수익/수익률로 해석하지 마세요.[/dim]")
     console.print("[dim]미실현 손익만 표시되며, 실현 손익은 별도 거래 내역에서 확인하세요.[/dim]")
     console.print("[dim]불완전 평가 기록이 포함된 변화는 '계산 불가'로 표시됩니다.[/dim]")
+
+
+@portfolio_app.command("deposit")
+def portfolio_deposit(
+    amount: str = typer.Option(
+        ...,
+        "--amount",
+        "-a",
+        help="입금액 (양수)",
+    ),
+    currency: str = typer.Option(
+        "KRW",
+        "--currency",
+        "-c",
+        help="통화 (KRW 또는 USD)",
+        case_sensitive=False,
+    ),
+    idempotency_key: str | None = typer.Option(
+        None,
+        "--idempotency-key",
+        "-k",
+        help="멱등성 키 (미제공 시 자동 생성)",
+    ),
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+) -> None:
+    """모의 계좌에 입금."""
+
+    from decimal import InvalidOperation
+
+    try:
+        amount_dec = Decimal(str(amount))
+    except (InvalidOperation, ValueError):
+        console.print(f"[red]잘못된 금액: {amount}[/red]")
+        raise typer.Exit(1)
+
+    if amount_dec <= 0:
+        console.print("[red]입금액은 양수여야 합니다[/red]")
+        raise typer.Exit(1)
+
+    currency = currency.upper()
+    if currency not in ("KRW", "USD"):
+        console.print(f"[red]지원하지 않는 통화: {currency}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        broker = MockBroker(db_path=db_path)
+        cash_flow = broker.deposit(
+            amount=amount_dec,
+            currency=currency,
+            idempotency_key=idempotency_key,
+        )
+        broker.close()
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]입금 처리 중 오류: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print("[green]입금 완료[/green]")
+    console.print(f"  ID: {cash_flow.id}")
+    console.print(f"  멱등성 키: {cash_flow.idempotency_key}")
+    console.print(f"  발생 시각: {cash_flow.occurred_at.isoformat()}")
+    console.print(f"  종류: 입금 ({cash_flow.flow_type.value})")
+    console.print(f"  통화: {cash_flow.currency}")
+    console.print(f"  금액: {cash_flow.amount:,.0f} {cash_flow.currency}")
+    console.print(f"  입금 전 잔고: {cash_flow.balance_before:,.0f} {cash_flow.currency}")
+    console.print(f"  입금 후 잔고: {cash_flow.balance_after:,.0f} {cash_flow.currency}")
+
+
+@portfolio_app.command("withdraw")
+def portfolio_withdraw(
+    amount: str = typer.Option(
+        ...,
+        "--amount",
+        "-a",
+        help="출금액 (양수)",
+    ),
+    currency: str = typer.Option(
+        "KRW",
+        "--currency",
+        "-c",
+        help="통화 (KRW 또는 USD)",
+        case_sensitive=False,
+    ),
+    idempotency_key: str | None = typer.Option(
+        None,
+        "--idempotency-key",
+        "-k",
+        help="멱등성 키 (미제공 시 자동 생성)",
+    ),
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+) -> None:
+    """모의 계좌에서 출금."""
+    from decimal import InvalidOperation
+
+    try:
+        amount_dec = Decimal(str(amount))
+    except (InvalidOperation, ValueError):
+        console.print(f"[red]잘못된 금액: {amount}[/red]")
+        raise typer.Exit(1)
+
+    if amount_dec <= 0:
+        console.print("[red]출금액은 양수여야 합니다[/red]")
+        raise typer.Exit(1)
+
+    currency = currency.upper()
+    if currency not in ("KRW", "USD"):
+        console.print(f"[red]지원하지 않는 통화: {currency}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        broker = MockBroker(db_path=db_path)
+        cash_flow = broker.withdraw(
+            amount=amount_dec,
+            currency=currency,
+            idempotency_key=idempotency_key,
+        )
+        broker.close()
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]출금 처리 중 오류: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print("[green]출금 완료[/green]")
+    console.print(f"  ID: {cash_flow.id}")
+    console.print(f"  멱등성 키: {cash_flow.idempotency_key}")
+    console.print(f"  발생 시각: {cash_flow.occurred_at.isoformat()}")
+    console.print(f"  종류: 출금 ({cash_flow.flow_type.value})")
+    console.print(f"  통화: {cash_flow.currency}")
+    console.print(f"  금액: {cash_flow.amount:,.0f} {cash_flow.currency}")
+    console.print(f"  출금 전 잔고: {cash_flow.balance_before:,.0f} {cash_flow.currency}")
+    console.print(f"  출금 후 잔고: {cash_flow.balance_after:,.0f} {cash_flow.currency}")
+
+
+@portfolio_app.command("cashflows")
+def portfolio_cashflows(
+    limit: int = typer.Option(
+        30,
+        "--limit",
+        "-l",
+        help="조회할 기록 개수 (기본값: 30)",
+        min=1,
+        max=100,
+    ),
+    currency: str | None = typer.Option(
+        None,
+        "--currency",
+        "-c",
+        help="통화 필터 (KRW 또는 USD)",
+        case_sensitive=False,
+    ),
+    flow_type: str | None = typer.Option(
+        None,
+        "--type",
+        "-t",
+        help="입금/출금 필터 (DEPOSIT 또는 WITHDRAWAL)",
+        case_sensitive=False,
+    ),
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+) -> None:
+    """입출금 원장 조회."""
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    from invest_agent.storage.repositories import CashFlowRepository
+
+    repo = CashFlowRepository(db_path)
+
+    if currency:
+        currency = currency.upper()
+        if currency not in ("KRW", "USD"):
+            console.print(f"[red]지원하지 않는 통화: {currency}[/red]")
+            raise typer.Exit(1)
+        cash_flows = repo.get_by_currency(currency, limit)
+    elif flow_type:
+        flow_type = flow_type.upper()
+        if flow_type not in ("DEPOSIT", "WITHDRAWAL"):
+            console.print(f"[red]지원하지 않는 타입: {flow_type}[/red]")
+            raise typer.Exit(1)
+        cash_flows = repo.get_by_flow_type(CashFlowType(flow_type), limit)
+    else:
+        cash_flows = repo.get_latest(limit)
+
+    if not cash_flows:
+        console.print("[yellow]저장된 입출금 기록이 없습니다.[/yellow]")
+        return
+
+    console.print("[bold cyan]입출금 원장[/bold cyan]")
+    console.print("기준 통화: KRW/USD")
+    console.print(f"조회 개수: {len(cash_flows)}개 (최신순)")
+    console.print()
+
+    table = Table(title="입출금 원장")
+    table.add_column("발생 시각", style="cyan", justify="center")
+    table.add_column("종류", justify="center", style="bold")
+    table.add_column("통화", justify="center")
+    table.add_column("금액", justify="right", style="green")
+    table.add_column("거래 전 잔고", justify="right", style="blue")
+    table.add_column("거래 후 잔고", justify="right", style="blue")
+    table.add_column("멱등성 키", style="dim")
+
+    for cf in cash_flows:
+        flow_str = cf.flow_type.value
+        if cf.flow_type == CashFlowType.DEPOSIT:
+            flow_str = f"[green]{flow_str}[/green]"
+        else:
+            flow_str = f"[red]{flow_str}[/red]"
+
+        table.add_row(
+            cf.occurred_at.strftime("%Y-%m-%d %H:%M:%S"),
+            flow_str,
+            cf.currency,
+            f"{cf.amount:,.0f} {cf.currency}",
+            f"{cf.balance_before:,.0f} {cf.currency}",
+            f"{cf.balance_after:,.0f} {cf.currency}",
+            cf.idempotency_key[:20] + "..." if len(cf.idempotency_key) > 20 else cf.idempotency_key,
+        )
+
+    console.print(table)
+    console.print()
 
 
 if __name__ == "__main__":

@@ -36,6 +36,11 @@ class OrderStatus(StrEnum):
     MANUAL_REVIEW = "MANUAL_REVIEW"
 
 
+class CashFlowType(StrEnum):
+    DEPOSIT = "DEPOSIT"
+    WITHDRAWAL = "WITHDRAWAL"
+
+
 class EvidenceType(StrEnum):
     PRICE = "PRICE"
     FUNDAMENTAL = "FUNDAMENTAL"
@@ -187,6 +192,21 @@ class PortfolioSnapshot:
     positions: dict[str, dict[str, Any]] = field(default_factory=dict)
     unrealized_pnl: Decimal = Decimal("0")
     equity_complete: bool = True
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class CashFlow:
+    """입출금 원장 항목."""
+    id: UUID = field(default_factory=uuid4)
+    idempotency_key: str = ""
+    occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    recorded_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    flow_type: CashFlowType = CashFlowType.DEPOSIT
+    currency: str = "KRW"
+    amount: Decimal = Decimal("0")
+    balance_before: Decimal = Decimal("0")
+    balance_after: Decimal = Decimal("0")
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

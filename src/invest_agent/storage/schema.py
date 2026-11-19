@@ -8,7 +8,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 DDL_STATEMENTS = [
     # theses 테이블
@@ -203,6 +203,21 @@ DDL_STATEMENTS = [
         positions TEXT NOT NULL DEFAULT '{}',
         unrealized_pnl TEXT NOT NULL DEFAULT '0',
         equity_complete INTEGER NOT NULL DEFAULT 1,
+        metadata TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    # cash_flows 테이블 (입출금 원장)
+    """
+    CREATE TABLE IF NOT EXISTS cash_flows (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        occurred_at TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        flow_type TEXT NOT NULL CHECK (flow_type IN ('DEPOSIT', 'WITHDRAWAL')),
+        currency TEXT NOT NULL CHECK (currency IN ('KRW', 'USD')),
+        amount TEXT NOT NULL,
+        balance_before TEXT NOT NULL,
+        balance_after TEXT NOT NULL,
         metadata TEXT NOT NULL DEFAULT '{}'
     )
     """,
@@ -513,6 +528,24 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
     print("Migration v4 -> v5 completed")
 
 
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """v5 -> v6 마이그레이션: cash_flows 테이블 추가.
+
+    새 테이블 추가:
+    - cash_flows: 입출금 원장 저장
+
+    이 테이블은 기존 데이터와 무관하게 새로 생성되므로 단순 생성만 수행.
+    """
+    # cash_flows 테이블 생성
+    for ddl in DDL_STATEMENTS:
+        if 'CREATE TABLE IF NOT EXISTS cash_flows' in ddl:
+            conn.execute(ddl)
+            print("Created cash_flows table")
+            break
+
+    print("Migration v5 -> v6 completed")
+
+
 def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
     """마이그레이션 실행 (현재 버전 -> 타겟 버전)."""
     if target_version != SCHEMA_VERSION:
@@ -558,6 +591,11 @@ def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
         if current == 4 and target_version >= 5:
             _migrate_v4_to_v5(conn)
             current = 5
+
+        # v5 -> v6
+        if current == 5 and target_version >= 6:
+            _migrate_v5_to_v6(conn)
+            current = 6
 
         conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                      (target_version, datetime.now(UTC).isoformat()))

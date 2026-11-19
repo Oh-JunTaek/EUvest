@@ -10,6 +10,8 @@ from uuid import UUID
 
 from invest_agent.domain.models import (
     AgentRun,
+    CashFlow,
+    CashFlowType,
     Decision,
     DecisionOutcome,
     EquitySnapshot,
@@ -787,6 +789,123 @@ class PortfolioSnapshotRepository:
             positions=json.loads(row["positions"]) if row["positions"] else {},
             unrealized_pnl=Decimal(row["unrealized_pnl"]),
             equity_complete=bool(row["equity_complete"]),
+            metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+        )
+
+
+class CashFlowRepository:
+    """입출금 원장 리포지토리."""
+
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
+        ensure_db(self.db_path)
+
+    @contextmanager
+    def _conn(self):
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def _execute_save(self, conn, cash_flow: CashFlow) -> None:
+        """입출금 기록 저장 (기존 연결 사용)."""
+        conn.execute(
+            """
+            INSERT INTO cash_flows
+            (id, idempotency_key, occurred_at, recorded_at, flow_type, currency, amount, balance_before, balance_after, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(idempotency_key) DO UPDATE SET
+                id=excluded.id,
+                occurred_at=excluded.occurred_at,
+                recorded_at=excluded.recorded_at,
+                flow_type=excluded.flow_type,
+                currency=excluded.currency,
+                amount=excluded.amount,
+                balance_before=excluded.balance_before,
+                balance_after=excluded.balance_after,
+                metadata=excluded.metadata
+            """,
+            (
+                str(cash_flow.id),
+                cash_flow.idempotency_key,
+                cash_flow.occurred_at.isoformat(),
+                cash_flow.recorded_at.isoformat(),
+                cash_flow.flow_type.value,
+                cash_flow.currency,
+                str(cash_flow.amount),
+                str(cash_flow.balance_before),
+                str(cash_flow.balance_after),
+                json.dumps(cash_flow.metadata),
+            ),
+        )
+
+    def save(self, cash_flow: CashFlow) -> None:
+        """입출금 기록 저장."""
+        with self._conn() as conn:
+            self._execute_save(conn, cash_flow)
+            conn.commit()
+
+    def save_with_connection(self, conn, cash_flow: CashFlow) -> None:
+        """입출금 기록 저장 (기존 연결 사용)."""
+        self._execute_save(conn, cash_flow)
+
+    def get(self, cash_flow_id: UUID) -> CashFlow | None:
+        """ID로 입출금 기록 조회."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM cash_flows WHERE id = ?", (str(cash_flow_id),)).fetchone()
+            if not row:
+                return None
+            return self._row_to_cash_flow(row)
+
+    def get_by_idempotency_key(self, key: str) -> CashFlow | None:
+        """멱등성 키로 입출금 기록 조회 (중복 방지용)."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM cash_flows WHERE idempotency_key = ?", (key,)).fetchone()
+            if not row:
+                return None
+            return self._row_to_cash_flow(row)
+
+    def get_latest(self, limit: int = 30) -> list[CashFlow]:
+        """최신 입출금 기록 조회 (최신순)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cash_flows ORDER BY occurred_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._row_to_cash_flow(row) for row in rows]
+
+    def get_by_currency(self, currency: str, limit: int = 30) -> list[CashFlow]:
+        """통화별 입출금 기록 조회."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cash_flows WHERE currency = ? ORDER BY occurred_at DESC LIMIT ?",
+                (currency, limit),
+            ).fetchall()
+            return [self._row_to_cash_flow(row) for row in rows]
+
+    def get_by_flow_type(self, flow_type: CashFlowType, limit: int = 30) -> list[CashFlow]:
+        """입금/출금 타입별 기록 조회."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cash_flows WHERE flow_type = ? ORDER BY occurred_at DESC LIMIT ?",
+                (flow_type.value, limit),
+            ).fetchall()
+            return [self._row_to_cash_flow(row) for row in rows]
+
+    def _row_to_cash_flow(self, row: sqlite3.Row) -> CashFlow:
+        return CashFlow(
+            id=UUID(row["id"]),
+            idempotency_key=row["idempotency_key"],
+            occurred_at=datetime.fromisoformat(row["occurred_at"]),
+            recorded_at=datetime.fromisoformat(row["recorded_at"]),
+            flow_type=CashFlowType(row["flow_type"]),
+            currency=row["currency"],
+            amount=Decimal(row["amount"]),
+            balance_before=Decimal(row["balance_before"]),
+            balance_after=Decimal(row["balance_after"]),
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
         )
 

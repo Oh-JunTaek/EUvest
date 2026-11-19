@@ -15,6 +15,8 @@ from invest_agent.broker.protocol import (
     Position,
     Quote,
 )
+from invest_agent.domain.models import CashFlow, CashFlowType
+from invest_agent.storage.repositories import CashFlowRepository
 from invest_agent.storage.schema import ensure_db
 
 
@@ -431,6 +433,144 @@ class MockBroker(BrokerProtocol):
             self._orders[order_id]["updated_at"] = datetime.now(UTC)
             return True
         return False
+
+    def deposit(
+        self,
+        amount: Decimal,
+        currency: str = "KRW",
+        idempotency_key: str | None = None,
+        occurred_at: datetime | None = None,
+        metadata: dict | None = None,
+    ) -> CashFlow:
+        """입금 처리."""
+        if amount <= 0:
+            raise ValueError("입금액은 양수여야 합니다")
+        if currency not in ("KRW", "USD"):
+            raise ValueError(f"지원하지 않는 통화: {currency}")
+        if not idempotency_key:
+            import uuid
+            idempotency_key = f"deposit_{uuid.uuid4().hex[:16]}"
+
+        if not self._db_path:
+            raise ValueError("DB 경로가 설정되지 않아 입금할 수 없습니다")
+
+        now = datetime.now(UTC)
+        occurred = occurred_at or now
+        recorded = now
+
+        repo = CashFlowRepository(self._db_path)
+
+        existing = repo.get_by_idempotency_key(idempotency_key)
+        if existing:
+            return existing
+
+        if currency == "KRW":
+            balance_before = self._cash_krw
+            balance_after = self._cash_krw + amount
+        else:
+            balance_before = self._cash_usd
+            balance_after = self._cash_usd + amount
+
+        cash_flow = CashFlow(
+            idempotency_key=idempotency_key,
+            occurred_at=occurred,
+            recorded_at=recorded,
+            flow_type=CashFlowType.DEPOSIT,
+            currency=currency,
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=balance_after,
+            metadata=metadata or {},
+        )
+
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+
+            if currency == "KRW":
+                self._cash_krw = balance_after
+            else:
+                self._cash_usd = balance_after
+
+            self._save_account(commit=False)
+            repo.save_with_connection(self._conn, cash_flow)
+
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+        return cash_flow
+
+    def withdraw(
+        self,
+        amount: Decimal,
+        currency: str = "KRW",
+        idempotency_key: str | None = None,
+        occurred_at: datetime | None = None,
+        metadata: dict | None = None,
+    ) -> CashFlow:
+        """출금 처리."""
+        if amount <= 0:
+            raise ValueError("출금액은 양수여야 합니다")
+        if currency not in ("KRW", "USD"):
+            raise ValueError(f"지원하지 않는 통화: {currency}")
+        if not idempotency_key:
+            import uuid
+            idempotency_key = f"withdraw_{uuid.uuid4().hex[:16]}"
+
+        if not self._db_path:
+            raise ValueError("DB 경로가 설정되지 않아 출금할 수 없습니다")
+
+        now = datetime.now(UTC)
+        occurred = occurred_at or now
+        recorded = now
+
+        repo = CashFlowRepository(self._db_path)
+
+        existing = repo.get_by_idempotency_key(idempotency_key)
+        if existing:
+            return existing
+
+        if currency == "KRW":
+            balance_before = self._cash_krw
+            if balance_before < amount:
+                raise ValueError(f"KRW 잔고 부족: {balance_before} < {amount}")
+            balance_after = self._cash_krw - amount
+        else:
+            balance_before = self._cash_usd
+            if balance_before < amount:
+                raise ValueError(f"USD 잔고 부족: {balance_before} < {amount}")
+            balance_after = self._cash_usd - amount
+
+        cash_flow = CashFlow(
+            idempotency_key=idempotency_key,
+            occurred_at=occurred,
+            recorded_at=recorded,
+            flow_type=CashFlowType.WITHDRAWAL,
+            currency=currency,
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=balance_after,
+            metadata=metadata or {},
+        )
+
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+
+            if currency == "KRW":
+                self._cash_krw = balance_after
+            else:
+                self._cash_usd = balance_after
+
+            self._save_account(commit=False)
+            repo.save_with_connection(self._conn, cash_flow)
+
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+        return cash_flow
 
     def close(self) -> None:
         """DB 연결 종료."""

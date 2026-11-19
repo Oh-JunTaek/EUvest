@@ -8,7 +8,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 DDL_STATEMENTS = [
     # theses 테이블
@@ -189,6 +189,21 @@ DDL_STATEMENTS = [
         realized_pnl TEXT NOT NULL DEFAULT '0',
         metadata TEXT NOT NULL DEFAULT '{}',
         FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT
+    )
+    """,
+    # portfolio_snapshots 테이블 (수동 포트폴리오 평가 이력)
+    """
+    CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        cash_krw TEXT NOT NULL DEFAULT '0',
+        cash_usd TEXT NOT NULL DEFAULT '0',
+        fx_rate_usd_krw TEXT NOT NULL DEFAULT '1300',
+        total_equity TEXT NOT NULL DEFAULT '0',
+        positions TEXT NOT NULL DEFAULT '{}',
+        unrealized_pnl TEXT NOT NULL DEFAULT '0',
+        equity_complete INTEGER NOT NULL DEFAULT 1,
+        metadata TEXT NOT NULL DEFAULT '{}'
     )
     """,
     # 인덱스
@@ -480,6 +495,23 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
     print("Migration v3 -> v4 completed")
 
 
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """v4 -> v5 마이그레이션: portfolio_snapshots 테이블 추가.
+
+    새 테이블 추가:
+    - portfolio_snapshots: 수동 포트폴리오 평가 이력 저장
+
+    이 테이블은 기존 데이터와 무관하게 새로 생성되므로 단순 생성만 수행.
+    """
+    # portfolio_snapshots 테이블 생성
+    for ddl in DDL_STATEMENTS:
+        if 'CREATE TABLE IF NOT EXISTS portfolio_snapshots' in ddl:
+            conn.execute(ddl)
+            print("Created portfolio_snapshots table")
+            break
+
+    print("Migration v4 -> v5 completed")
+
 
 def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
     """마이그레이션 실행 (현재 버전 -> 타겟 버전)."""
@@ -521,6 +553,11 @@ def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
         if current == 3 and target_version >= 4:
             _migrate_v3_to_v4(conn)
             current = 4
+
+        # v4 -> v5
+        if current == 4 and target_version >= 5:
+            _migrate_v4_to_v5(conn)
+            current = 5
 
         conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                      (target_version, datetime.now(UTC).isoformat()))

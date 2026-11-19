@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -163,12 +163,30 @@ class Handoff:
 class EquitySnapshot:
     id: UUID = field(default_factory=uuid4)
     run_id: UUID = UUID(int=0)
-    timestamp: datetime = field(default_factory=lambda: datetime.utcnow())
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     total_equity: Decimal = Decimal("0")
     cash_balance: Decimal = Decimal("0")
     positions: dict[str, dict[str, Any]] = field(default_factory=dict)
     unrealized_pnl: Decimal = Decimal("0")
     realized_pnl: Decimal = Decimal("0")
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class PortfolioSnapshot:
+    """수동 포트폴리오 평가 스냅샷.
+
+    agent_runs와 무관하게 독립적으로 저장되는 포트폴리오 평가 이력.
+    """
+    id: UUID = field(default_factory=uuid4)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    cash_krw: Decimal = Decimal("0")
+    cash_usd: Decimal = Decimal("0")
+    fx_rate_usd_krw: Decimal = Decimal("1300")
+    total_equity: Decimal = Decimal("0")
+    positions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    unrealized_pnl: Decimal = Decimal("0")
+    equity_complete: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -12,9 +14,11 @@ from rich.table import Table
 from invest_agent.market.ingestion import OHLCVIngestionService
 from invest_agent.market.market_data import Market
 from invest_agent.operations.health import check_health
+from invest_agent.portfolio import calculate_portfolio_valuation
 from invest_agent.reporting.daily import save_daily_report
 from invest_agent.runtime.orchestrator import create_orchestrator
 from invest_agent.settings import get_settings
+from invest_agent.storage.repositories import PortfolioSnapshotRepository
 from invest_agent.storage.schema import ensure_db
 
 app = typer.Typer(
@@ -695,146 +699,51 @@ def portfolio_show(
     예시:
         uv run invest portfolio show --db data/agent.db
     """
-    import sqlite3
-    from datetime import UTC, datetime
-    from decimal import Decimal
-    from pathlib import Path
-
-    if not Path(db_path).exists():
-        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+    try:
+        valuation = calculate_portfolio_valuation(db_path)
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
-
-    # SQLite 읽기 전용 연결로 잔고/포지션 직접 조회
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
-    # 계좌 정보 조회 (환율, 갱신 시각 포함)
-    account_row = cursor.execute(
-        "SELECT cash_krw, cash_usd, fx_rate_usd_krw, updated_at "
-        "FROM mock_account WHERE id = 'default'"
-    ).fetchone()
-
-    if not account_row:
-        conn.close()
-        console.print("[red]mock_account 레코드가 없습니다: default[/red]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
-
-    cash_krw = Decimal(account_row["cash_krw"])
-    cash_usd = Decimal(account_row["cash_usd"])
-    fx_rate = Decimal(account_row["fx_rate_usd_krw"])
-    db_updated_at = account_row["updated_at"]
-
-    # 포지션 조회 (실제 테이블명: mock_positions)
-    positions = cursor.execute(
-        "SELECT asset_id, quantity, avg_price, current_price, currency "
-        "FROM mock_positions WHERE quantity > 0"
-    ).fetchall()
-
-    conn.close()
-
-    # 조회 시각
-    query_time = datetime.now(UTC).isoformat()
 
     # 헤더 출력
     console.print("[bold cyan]OFFLINE_SIM 포트폴리오 현황[/bold cyan]")
     console.print("기준 통화: KRW")
-    console.print(f"조회 시각: {query_time}")
-    if db_updated_at:
-        console.print(f"DB 갱신 시각: {db_updated_at}")
-    console.print(f"적용 환율: 1 USD = {fx_rate:,.0f} KRW (DB 저장값)")
+    console.print(f"조회 시각: {valuation.timestamp}")
+    if valuation.db_updated_at:
+        console.print(f"DB 갱신 시각: {valuation.db_updated_at}")
+    console.print(f"적용 환율: 1 USD = {valuation.fx_rate:,.0f} KRW (DB 저장값)")
     console.print("가격/환율 출처: MockBroker 내부 상태 (시뮬레이션용)")
     console.print()
 
     # 현금 잔고
     console.print("[green]현금 잔고[/green]")
-    console.print(f"  KRW 가용 현금: {cash_krw:,.0f} KRW")
-    if cash_usd == 0:
+    console.print(f"  KRW 가용 현금: {valuation.cash_krw:,.0f} KRW")
+    if valuation.cash_usd == 0:
         console.print("  USD 현금 잔고: 0.00 USD")
     else:
-        console.print(f"  USD 현금 잔고: {cash_usd:,.2f} USD")
+        console.print(f"  USD 현금 잔고: {valuation.cash_usd:,.2f} USD")
     console.print()
-
-    # 총 평가액 계산 - 확인된 값만 합산
-    total_equity = cash_krw
-    equity_complete = True
-    equity_parts = []
-
-    # KRW 현금
-    equity_parts.append(("KRW 현금", cash_krw))
-
-    # USD 현금 환산
-    if cash_usd is not None:
-        usd_krw = cash_usd * fx_rate
-        total_equity += usd_krw
-        equity_parts.append((f"USD 현금 ({fx_rate:,.0f} KRW/USD)", usd_krw))
-    else:
-        equity_complete = False
-        equity_parts.append(("USD 현금", None))
-
-    position_data = []
-
-    for pos in positions:
-        asset_id = pos["asset_id"]
-        qty = Decimal(pos["quantity"])
-        avg_price = Decimal(pos["avg_price"])
-        curr_price = Decimal(pos["current_price"])
-        currency = pos["currency"]
-
-        market_value = qty * curr_price
-        if currency == "USD":
-            market_value_krw = market_value * fx_rate
-            currency_label = f"USD ({fx_rate:,.0f} KRW/USD)"
-        else:
-            market_value_krw = market_value
-            currency_label = "KRW"
-
-        unrealized = qty * (curr_price - avg_price)
-        if currency == "USD":
-            unrealized_krw = unrealized * fx_rate
-        else:
-            unrealized_krw = unrealized
-
-        total_equity += market_value_krw
-        equity_parts.append((f"{asset_id} 평가액 ({currency_label})", market_value_krw))
-
-        # 표시용 통화 및 가격
-        price_display = f"{curr_price:,.2f} {currency}"
-        avg_display = f"{avg_price:,.2f} {currency}"
-        mkt_display = f"{market_value_krw:,.0f} KRW"
-        unreal_display = f"{unrealized_krw:,.0f} KRW"
-        if unrealized_krw >= 0:
-            unreal_display = f"[green]{unreal_display}[/green]"
-        else:
-            unreal_display = f"[red]{unreal_display}[/red]"
-
-        position_data.append({
-            "asset_id": asset_id,
-            "qty": qty,
-            "avg_display": avg_display,
-            "price_display": price_display,
-            "mkt_display": mkt_display,
-            "unreal_display": unreal_display,
-            "currency": currency,
-        })
 
     # 총 평가액 출력
     console.print("[green]총 포트폴리오 평가액[/green]")
-    for label, value in equity_parts:
+    for label, value in valuation.equity_parts:
         if value is not None:
             console.print(f"  {label}: {value:,.0f} KRW")
         else:
             console.print(f"  {label}: 미확인")
 
-    if equity_complete:
-        console.print(f"  [bold]총 평가액: {total_equity:,.0f} KRW[/bold]")
+    if valuation.equity_complete:
+        console.print(f"  [bold]총 평가액: {valuation.total_equity:,.0f} KRW[/bold]")
     else:
-        console.print(f"  [yellow]총 평가액: {total_equity:,.0f} KRW (일부 항목 미확인, 불완전)[/yellow]")
+        console.print(f"  [yellow]총 평가액: {valuation.total_equity:,.0f} KRW (일부 항목 미확인, 불완전)[/yellow]")
     console.print()
 
     # 보유 종목
-    if position_data:
-        console.print(f"[green]보유 종목 ({len(position_data)}개)[/green]")
+    if valuation.positions:
+        console.print(f"[green]보유 종목 ({len(valuation.positions)}개)[/green]")
         table = Table(title="보유 종목 상세")
         table.add_column("자산 ID", style="cyan")
         table.add_column("수량", justify="right", style="yellow")
@@ -843,7 +752,7 @@ def portfolio_show(
         table.add_column("평가금액(KRW)", justify="right", style="magenta")
         table.add_column("미실현 손익(KRW)", justify="right", style="red")
 
-        for pos in position_data:
+        for pos in valuation.positions:
             table.add_row(
                 pos["asset_id"],
                 f"{pos['qty']:,.0f}",
@@ -861,6 +770,168 @@ def portfolio_show(
     console.print("[dim]참고: 이는 OFFLINE_SIM 시뮬레이션 평가액입니다. 실계좌 평가액과 다릅니다.[/dim]")
     console.print("[dim]미실현 손익만 표시되며, 실현 손익은 별도 거래 내역에서 확인하세요.[/dim]")
     console.print("[dim]누적 수익률, TWR, XIRR, MDD 등은 입출금 기록이 불충분해 계산하지 않습니다.[/dim]")
+
+
+@portfolio_app.command("snapshot")
+def portfolio_snapshot(
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+) -> None:
+    """현재 포트폴리오 상태를 스냅샷으로 저장.
+
+    MockBroker 계좌의 현재 평가액을 포트폴리오 평가 이력으로 기록합니다.
+    이 명령은 계좌 상태를 변경하지 않습니다 (읽기 전용).
+
+    예시:
+        uv run invest portfolio snapshot --db data/agent.db
+    """
+    try:
+        valuation = calculate_portfolio_valuation(db_path)
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    # 포트폴리오 스냅샷 저장
+    repo = PortfolioSnapshotRepository(db_path)
+
+    from uuid import uuid4
+
+    from invest_agent.domain.models import PortfolioSnapshot
+
+    snapshot = PortfolioSnapshot(
+        id=uuid4(),
+        timestamp=datetime.fromisoformat(valuation.timestamp.replace("Z", "+00:00")) if valuation.timestamp.endswith("Z") else datetime.fromisoformat(valuation.timestamp),
+        cash_krw=valuation.cash_krw,
+        cash_usd=valuation.cash_usd,
+        fx_rate_usd_krw=valuation.fx_rate,
+        total_equity=valuation.total_equity,
+        positions={
+            pos["asset_id"]: {
+                "quantity": str(pos["qty"]),
+                "avg_price": pos["avg_display"].split()[0].replace(",", ""),
+                "current_price": pos["price_display"].split()[0].replace(",", ""),
+                "currency": pos["currency"],
+                "market_value_krw": str(pos["market_value_krw"]),
+                "unrealized_krw": str(pos["unrealized_krw"]),
+            }
+            for pos in valuation.positions
+        },
+        unrealized_pnl=valuation.unrealized_pnl,
+        equity_complete=valuation.equity_complete,
+        metadata={
+            "db_updated_at": valuation.db_updated_at,
+            "query_time": valuation.timestamp,
+        },
+    )
+
+    repo.save(snapshot)
+
+    console.print("[green]포트폴리오 스냅샷 저장 완료[/green]")
+    console.print(f"  스냅샷 ID: {snapshot.id}")
+    console.print(f"  기록 시각: {snapshot.timestamp.isoformat()}")
+    console.print(f"  총 평가액: {snapshot.total_equity:,.0f} KRW")
+    if not snapshot.equity_complete:
+        console.print("  [yellow]주의: 평가 불완전 (일부 항목 미확인)[/yellow]")
+
+
+@portfolio_app.command("history")
+def portfolio_history(
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+    limit: int = typer.Option(
+        30,
+        "--limit",
+        "-l",
+        help="조회할 기록 개수 (기본값: 30)",
+        min=1,
+        max=100,
+    ),
+) -> None:
+    """포트폴리오 평가 이력 조회.
+
+    저장된 포트폴리오 스냅샷을 최신순으로 출력합니다.
+    이전 기록 대비 평가액 변화도 함께 표시합니다.
+
+    예시:
+        uv run invest portfolio history --db data/agent.db
+        uv run invest portfolio history --db data/agent.db --limit 10
+    """
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    repo = PortfolioSnapshotRepository(db_path)
+    snapshots = repo.get_latest(limit)
+
+    if not snapshots:
+        console.print("[yellow]저장된 포트폴리오 평가 이력이 없습니다.[/yellow]")
+        console.print("[dim]먼저 'invest portfolio snapshot'으로 스냅샷을 저장하세요.[/dim]")
+        return
+
+    console.print("[bold cyan]포트폴리오 평가 이력[/bold cyan]")
+    console.print("기준 통화: KRW")
+    console.print(f"조회 개수: {len(snapshots)}개 (최신순)")
+    console.print()
+
+    table = Table(title="포트폴리오 평가 이력")
+    table.add_column("기록 시각", style="cyan", justify="center")
+    table.add_column("총 평가액", justify="right", style="bold")
+    table.add_column("KRW 현금", justify="right", style="green")
+    table.add_column("USD 현금", justify="right", style="green")
+    table.add_column("미실현 손익", justify="right", style="red")
+    table.add_column("변화액", justify="right", style="yellow")
+    table.add_column("상태", style="magenta")
+
+    prev_equity: Decimal | None = None
+    for snap in snapshots:
+        equity_str = f"{snap.total_equity:,.0f} KRW"
+        krw_str = f"{snap.cash_krw:,.0f} KRW"
+        usd_str = f"{snap.cash_usd:,.2f} USD" if snap.cash_usd != 0 else "0.00 USD"
+        unreal_str = f"{snap.unrealized_pnl:,.0f} KRW"
+        if snap.unrealized_pnl >= 0:
+            unreal_str = f"[green]{unreal_str}[/green]"
+        else:
+            unreal_str = f"[red]{unreal_str}[/red]"
+
+        if prev_equity is not None:
+            diff = snap.total_equity - prev_equity
+            diff_str = f"{diff:+,.0f} KRW"
+            if diff >= 0:
+                diff_str = f"[green]{diff_str}[/green]"
+            else:
+                diff_str = f"[red]{diff_str}[/red]"
+        else:
+            diff_str = "—"
+
+        status = "완전" if snap.equity_complete else "[yellow]불완전[/yellow]"
+
+        table.add_row(
+            snap.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            equity_str,
+            krw_str,
+            usd_str,
+            unreal_str,
+            diff_str,
+            status,
+        )
+
+        prev_equity = snap.total_equity
+
+    console.print(table)
+    console.print()
+    console.print("[dim]참고: 변화액은 단순 평가액 차이입니다. 입출금이 반영되지 않았으므로 투자 수익/수익률로 해석하지 마세요.[/dim]")
+    console.print("[dim]미실현 손익만 표시되며, 실현 손익은 별도 거래 내역에서 확인하세요.[/dim]")
 
 
 if __name__ == "__main__":

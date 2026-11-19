@@ -213,7 +213,8 @@ class TestOHLCVRepository:
         result = self.repo.get_latest("KRX:005930", "FinanceDataReader")
         assert result is None
 
-    def test_schema_version_is_4(self):
-        """마이그레이션 후 스키마 버전이 4여야 함."""
+    def test_schema_version_is_current(self):
+        """마이그레이션 후 스키마 버전이 현재 버전이어야 함."""
         version = get_schema_version(self.db_path)
-        assert version == 4
+        from invest_agent.storage.schema import SCHEMA_VERSION
+        assert version == SCHEMA_VERSION

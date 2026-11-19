@@ -19,6 +19,7 @@ from invest_agent.domain.models import (
     OrderRecord,
     OrderSide,
     OrderStatus,
+    PortfolioSnapshot,
     RunStatus,
     Thesis,
 )
@@ -701,6 +702,91 @@ class EquitySnapshotRepository:
             positions=json.loads(row["positions"]) if row["positions"] else {},
             unrealized_pnl=Decimal(row["unrealized_pnl"]),
             realized_pnl=Decimal(row["realized_pnl"]),
+            metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+        )
+
+
+
+class PortfolioSnapshotRepository:
+    """수동 포트폴리오 평가 이력 리포지토리.
+
+    agent_runs와 무관하게 독립적으로 포트폴리오 스냅샷을 저장/조회한다.
+    """
+
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
+        ensure_db(self.db_path)
+
+    @contextmanager
+    def _conn(self):
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def save(self, snapshot: PortfolioSnapshot) -> None:
+        """포트폴리오 스냅샷 저장."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO portfolio_snapshots
+                (id, timestamp, cash_krw, cash_usd, fx_rate_usd_krw, total_equity, positions, unrealized_pnl, equity_complete, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(snapshot.id),
+                    snapshot.timestamp.isoformat(),
+                    str(snapshot.cash_krw),
+                    str(snapshot.cash_usd),
+                    str(snapshot.fx_rate_usd_krw),
+                    str(snapshot.total_equity),
+                    json.dumps(snapshot.positions),
+                    str(snapshot.unrealized_pnl),
+                    1 if snapshot.equity_complete else 0,
+                    json.dumps(snapshot.metadata),
+                ),
+            )
+            conn.commit()
+
+    def get(self, snapshot_id: UUID) -> PortfolioSnapshot | None:
+        """ID로 스냅샷 조회."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM portfolio_snapshots WHERE id = ?", (str(snapshot_id),)).fetchone()
+            if not row:
+                return None
+            return self._row_to_snapshot(row)
+
+    def get_latest(self, limit: int = 30) -> list[PortfolioSnapshot]:
+        """최신 스냅샷 조회 (최신순)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM portfolio_snapshots ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._row_to_snapshot(row) for row in rows]
+
+    def get_all(self) -> list[PortfolioSnapshot]:
+        """전체 스냅샷 조회 (최신순)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM portfolio_snapshots ORDER BY timestamp DESC"
+            ).fetchall()
+            return [self._row_to_snapshot(row) for row in rows]
+
+    def _row_to_snapshot(self, row: sqlite3.Row) -> PortfolioSnapshot:
+        return PortfolioSnapshot(
+            id=UUID(row["id"]),
+            timestamp=datetime.fromisoformat(row["timestamp"]),
+            cash_krw=Decimal(row["cash_krw"]),
+            cash_usd=Decimal(row["cash_usd"]),
+            fx_rate_usd_krw=Decimal(row["fx_rate_usd_krw"]),
+            total_equity=Decimal(row["total_equity"]),
+            positions=json.loads(row["positions"]) if row["positions"] else {},
+            unrealized_pnl=Decimal(row["unrealized_pnl"]),
+            equity_complete=bool(row["equity_complete"]),
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
         )
 

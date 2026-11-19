@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -19,7 +18,7 @@ from invest_agent.reporting.daily import save_daily_report
 from invest_agent.runtime.orchestrator import create_orchestrator
 from invest_agent.settings import get_settings
 from invest_agent.storage.repositories import PortfolioSnapshotRepository
-from invest_agent.storage.schema import ensure_db
+from invest_agent.storage.schema import ensure_db, migrate
 
 app = typer.Typer(
     name="invest",
@@ -677,6 +676,102 @@ def market_refresh(
         console.print(f"\n[red]Refresh failed: {result.error}[/red]")
         raise typer.Exit(1)
 
+
+# DB app
+db_app = typer.Typer(name="db", help="데이터베이스 관리")
+app.add_typer(db_app)
+
+
+@db_app.command("migrate")
+def db_migrate(
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="백업 확인 없이 강제 실행 (비권장)",
+    ),
+) -> None:
+    """기존 v4 DB를 v5로 마이그레이션.
+
+    portfolio_snapshots 테이블을 추가합니다.
+    마이그레이션 전 자동으로 백업을 생성합니다.
+
+    예시:
+        uv run invest db migrate --db data/agent.db
+    """
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    # 현재 스키마 버전 확인
+    import sqlite3
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+    conn.close()
+
+    if row is None:
+        console.print("[red]스키마 버전 정보를 찾을 수 없습니다.[/red]")
+        raise typer.Exit(1)
+
+    current_version = row[0]
+    from invest_agent.storage.schema import SCHEMA_VERSION
+
+    if current_version == SCHEMA_VERSION:
+        console.print(f"[green]이미 최신 스키마 버전({SCHEMA_VERSION})입니다.[/green]")
+        return
+
+    if current_version < 4 or current_version > SCHEMA_VERSION:
+        console.print(f"[red]지원하지 않는 마이그레이션: v{current_version} -> v{SCHEMA_VERSION}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[blue]마이그레이션 시작: v{current_version} -> v{SCHEMA_VERSION}[/blue]")
+    console.print(f"  대상 DB: {db_path}")
+    console.print(f"  현재 버전: {current_version}")
+    console.print(f"  목표 버전: {SCHEMA_VERSION}")
+
+    if not force:
+        console.print("[yellow]마이그레이션 전 백업이 자동 생성됩니다.[/yellow]")
+        console.print("[yellow]계속하시겠습니까? (y/N):[/yellow] ", end="")
+        import sys
+        response = sys.stdin.readline().strip().lower()
+        if response != "y":
+            console.print("[red]취소되었습니다.[/red]")
+            raise typer.Exit(1)
+
+    try:
+        migrate(db_path)
+    except sqlite3.OperationalError as e:
+        if "잠금" in str(e) or "lock" in str(e).lower():
+            console.print(f"[red]DB가 다른 프로세스에 의해 잠겨 있습니다. 다른 연결을 종료 후 재시도하세요: {e}[/red]")
+        else:
+            console.print(f"[red]마이그레이션 실패: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]마이그레이션 실패: {e}[/red]")
+        raise typer.Exit(1)
+
+    # 검증
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+    tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    conn.close()
+
+    if row and row[0] == SCHEMA_VERSION:
+        console.print(f"[green]마이그레이션 완료: v{SCHEMA_VERSION}[/green]")
+        console.print(f"  테이블 수: {len(tables)}")
+        if any(t[0] == "portfolio_snapshots" for t in tables):
+            console.print("  portfolio_snapshots 테이블: 생성됨")
+    else:
+        console.print("[red]마이그레이션 후 검증 실패[/red]")
+        raise typer.Exit(1)
+
+
 # Portfolio app
 portfolio_app = typer.Typer(name="portfolio", help="포트폴리오 현황 및 손익 조회")
 app.add_typer(portfolio_app)
@@ -753,13 +848,23 @@ def portfolio_show(
         table.add_column("미실현 손익(KRW)", justify="right", style="red")
 
         for pos in valuation.positions:
+            # PortfolioPosition 객체에서 표시용 문자열 생성
+            avg_display = f"{pos.avg_price:,.2f} {pos.currency}"
+            price_display = f"{pos.current_price:,.2f} {pos.currency}"
+            mkt_display = f"{pos.market_value_krw:,.0f} KRW"
+            unreal_display = f"{pos.unrealized_krw:,.0f} KRW"
+            if pos.unrealized_krw >= 0:
+                unreal_display = f"[green]{unreal_display}[/green]"
+            else:
+                unreal_display = f"[red]{unreal_display}[/red]"
+
             table.add_row(
-                pos["asset_id"],
-                f"{pos['qty']:,.0f}",
-                pos["avg_display"],
-                pos["price_display"],
-                pos["mkt_display"],
-                pos["unreal_display"],
+                pos.asset_id,
+                f"{pos.quantity:,.0f}",
+                avg_display,
+                price_display,
+                mkt_display,
+                unreal_display,
             )
 
         console.print(table)
@@ -813,15 +918,15 @@ def portfolio_snapshot(
         fx_rate_usd_krw=valuation.fx_rate,
         total_equity=valuation.total_equity,
         positions={
-            pos["asset_id"]: {
-                "quantity": str(pos["qty"]),
-                "avg_price": pos["avg_display"].split()[0].replace(",", ""),
-                "current_price": pos["price_display"].split()[0].replace(",", ""),
-                "currency": pos["currency"],
-                "market_value_krw": str(pos["market_value_krw"]),
-                "unrealized_krw": str(pos["unrealized_krw"]),
+            pos.asset_id: {
+                "quantity": str(pos.quantity),
+                "avg_price": str(pos.avg_price),
+                "current_price": str(pos.current_price),
+                "currency": pos.currency,
+                "market_value_krw": str(pos.market_value_krw),
+                "unrealized_krw": str(pos.unrealized_krw),
             }
-            for pos in valuation.positions
+            for pos in valuation.positions  # type: ignore[attr-defined]
         },
         unrealized_pnl=valuation.unrealized_pnl,
         equity_complete=valuation.equity_complete,
@@ -872,16 +977,20 @@ def portfolio_history(
         raise typer.Exit(1)
 
     repo = PortfolioSnapshotRepository(db_path)
-    snapshots = repo.get_latest(limit)
+    # limit+1개를 조회하여 가장 오래된 표시 레코드의 변화액도 정확히 계산
+    snapshots = repo.get_latest(limit + 1)
 
     if not snapshots:
         console.print("[yellow]저장된 포트폴리오 평가 이력이 없습니다.[/yellow]")
         console.print("[dim]먼저 'invest portfolio snapshot'으로 스냅샷을 저장하세요.[/dim]")
         return
 
+    # 표시할 레코드만 자르기 (limit 개)
+    display_snapshots = snapshots[:limit]
+
     console.print("[bold cyan]포트폴리오 평가 이력[/bold cyan]")
     console.print("기준 통화: KRW")
-    console.print(f"조회 개수: {len(snapshots)}개 (최신순)")
+    console.print(f"조회 개수: {len(display_snapshots)}개 (최신순)")
     console.print()
 
     table = Table(title="포트폴리오 평가 이력")
@@ -893,8 +1002,11 @@ def portfolio_history(
     table.add_column("변화액", justify="right", style="yellow")
     table.add_column("상태", style="magenta")
 
-    prev_equity: Decimal | None = None
-    for snap in snapshots:
+    # 전체 스냅샷 리스트에서 이전 레코드 찾기용 인덱스 맵 생성
+    # snapshots는 최신순 정렬되어 있음
+    snap_list = snapshots  # 이미 최신순
+
+    for idx, snap in enumerate(display_snapshots):
         equity_str = f"{snap.total_equity:,.0f} KRW"
         krw_str = f"{snap.cash_krw:,.0f} KRW"
         usd_str = f"{snap.cash_usd:,.2f} USD" if snap.cash_usd != 0 else "0.00 USD"
@@ -904,13 +1016,24 @@ def portfolio_history(
         else:
             unreal_str = f"[red]{unreal_str}[/red]"
 
-        if prev_equity is not None:
-            diff = snap.total_equity - prev_equity
-            diff_str = f"{diff:+,.0f} KRW"
-            if diff >= 0:
-                diff_str = f"[green]{diff_str}[/green]"
+        # 이전(과거) 레코드 찾기: display_snapshots에서 idx+1이 존재하면 그것, 없으면 snapshots에서 찾기
+        prev_snap = None
+        if idx + 1 < len(display_snapshots):
+            prev_snap = display_snapshots[idx + 1]
+        elif idx + 1 < len(snap_list):
+            prev_snap = snap_list[idx + 1]
+
+        if prev_snap is not None:
+            # 둘 중 하나라도 불완전하면 계산 불가
+            if not snap.equity_complete or not prev_snap.equity_complete:
+                diff_str = "[yellow]계산 불가[/yellow]"
             else:
-                diff_str = f"[red]{diff_str}[/red]"
+                diff = snap.total_equity - prev_snap.total_equity
+                diff_str = f"{diff:+,.0f} KRW"
+                if diff >= 0:
+                    diff_str = f"[green]{diff_str}[/green]"
+                else:
+                    diff_str = f"[red]{diff_str}[/red]"
         else:
             diff_str = "—"
 
@@ -926,12 +1049,11 @@ def portfolio_history(
             status,
         )
 
-        prev_equity = snap.total_equity
-
     console.print(table)
     console.print()
     console.print("[dim]참고: 변화액은 단순 평가액 차이입니다. 입출금이 반영되지 않았으므로 투자 수익/수익률로 해석하지 마세요.[/dim]")
     console.print("[dim]미실현 손익만 표시되며, 실현 손익은 별도 거래 내역에서 확인하세요.[/dim]")
+    console.print("[dim]불완전 평가 기록이 포함된 변화는 '계산 불가'로 표시됩니다.[/dim]")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,19 @@ class PortfolioValuation:
     unrealized_pnl: Decimal
 
 
+@dataclass(slots=True)
+class PortfolioPosition:
+    """포트폴리오 보유 종목 원본 데이터 (표시용 포맷팅과 분리)."""
+
+    asset_id: str
+    quantity: Decimal
+    avg_price: Decimal
+    current_price: Decimal
+    currency: str
+    market_value_krw: Decimal
+    unrealized_krw: Decimal
+
+
 def calculate_portfolio_valuation(db_path: str | Path) -> PortfolioValuation:
     """DB에서 포트폴리오 평가액을 계산한다.
 
@@ -65,6 +78,10 @@ def calculate_portfolio_valuation(db_path: str | Path) -> PortfolioValuation:
     fx_rate = Decimal(account_row["fx_rate_usd_krw"])
     db_updated_at = account_row["updated_at"]
 
+    # 환율 검증 (비정상적으로 높거나 낮은 값 방지)
+    if fx_rate <= 0 or fx_rate > Decimal("10000"):
+        raise ValueError(f"비정상적인 환율: {fx_rate} (1~10000 범위 필요)")
+
     # 포지션 조회
     positions = cursor.execute(
         "SELECT asset_id, quantity, avg_price, current_price, currency "
@@ -80,7 +97,7 @@ def calculate_portfolio_valuation(db_path: str | Path) -> PortfolioValuation:
     total_equity = cash_krw
     equity_complete = True
     equity_parts: list[tuple[str, Decimal | None]] = []
-    position_data: list[dict[str, Any]] = []
+    position_objects: list[PortfolioPosition] = []
     total_unrealized = Decimal("0")
 
     # KRW 현금
@@ -102,6 +119,10 @@ def calculate_portfolio_valuation(db_path: str | Path) -> PortfolioValuation:
         curr_price = Decimal(pos["current_price"])
         currency = pos["currency"]
 
+        # 통화 검증
+        if currency not in ("KRW", "USD"):
+            raise ValueError(f"지원하지 않는 통화: {currency} (KRW/USD만 지원)")
+
         market_value = qty * curr_price
         if currency == "USD":
             market_value_krw = market_value * fx_rate
@@ -120,27 +141,16 @@ def calculate_portfolio_valuation(db_path: str | Path) -> PortfolioValuation:
         total_unrealized += unrealized_krw
         equity_parts.append((f"{asset_id} 평가액 ({currency_label})", market_value_krw))
 
-        # 표시용 통화 및 가격
-        price_display = f"{curr_price:,.2f} {currency}"
-        avg_display = f"{avg_price:,.2f} {currency}"
-        mkt_display = f"{market_value_krw:,.0f} KRW"
-        unreal_display = f"{unrealized_krw:,.0f} KRW"
-        if unrealized_krw >= 0:
-            unreal_display = f"[green]{unreal_display}[/green]"
-        else:
-            unreal_display = f"[red]{unreal_display}[/red]"
-
-        position_data.append({
-            "asset_id": asset_id,
-            "qty": qty,
-            "avg_display": avg_display,
-            "price_display": price_display,
-            "mkt_display": mkt_display,
-            "unreal_display": unreal_display,
-            "currency": currency,
-            "market_value_krw": market_value_krw,
-            "unrealized_krw": unrealized_krw,
-        })
+        # 원본 Decimal 데이터 저장 (스냅샷 저장용)
+        position_objects.append(PortfolioPosition(
+            asset_id=asset_id,
+            quantity=qty,
+            avg_price=avg_price,
+            current_price=curr_price,
+            currency=currency,
+            market_value_krw=market_value_krw,
+            unrealized_krw=unrealized_krw,
+        ))
 
     return PortfolioValuation(
         timestamp=query_time,
@@ -151,7 +161,7 @@ def calculate_portfolio_valuation(db_path: str | Path) -> PortfolioValuation:
         total_equity=total_equity,
         equity_complete=equity_complete,
         equity_parts=equity_parts,
-        positions=position_data,
+        positions=position_objects,  # type: ignore[arg-type]
         unrealized_pnl=total_unrealized,
     )
 

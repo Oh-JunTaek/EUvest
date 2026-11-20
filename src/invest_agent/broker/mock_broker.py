@@ -61,6 +61,9 @@ class MockBroker(BrokerProtocol):
             self._cash_usd = Decimal("0")
             self._positions: dict[str, dict] = {}
 
+        # Track if instance is usable after errors
+        self._unusable = False
+
         # 초기 설정
         if initial_positions:
             for asset_id, qty in initial_positions.items():
@@ -455,6 +458,8 @@ class MockBroker(BrokerProtocol):
         metadata: dict | None = None,
     ) -> CashFlow:
         """입금 처리."""
+        if self._unusable:
+            raise RuntimeError("MockBroker instance is unusable due to previous transaction failure")
         self._validate_amount(amount)
         if currency not in ("KRW", "USD"):
             raise ValueError(f"지원하지 않는 통화: {currency}")
@@ -573,8 +578,16 @@ class MockBroker(BrokerProtocol):
             repo.save_with_connection(self._conn, cash_flow)
 
             self._conn.commit()
-        except Exception:
-            # On error, sync memory with DB before re-raising
+        except Exception as exc:
+            # First rollback the transaction
+            try:
+                self._conn.rollback()
+            except Exception as rollback_exc:
+                # If rollback fails, mark instance as unusable
+                self._unusable = True
+                raise RuntimeError(f"Transaction rollback failed: {rollback_exc}") from exc
+
+            # Then sync memory with DB state after rollback
             try:
                 account_row = self._conn.execute(
                     "SELECT cash_krw, cash_usd FROM mock_account WHERE id = 'default'"
@@ -582,9 +595,13 @@ class MockBroker(BrokerProtocol):
                 if account_row:
                     self._cash_krw = Decimal(account_row["cash_krw"])
                     self._cash_usd = Decimal(account_row["cash_usd"])
-            except Exception:
-                pass
-            self._conn.rollback()
+                else:
+                    raise RuntimeError("Failed to sync memory: mock_account record not found")
+            except Exception as sync_exc:
+                # If sync fails, mark instance as unusable
+                self._unusable = True
+                raise RuntimeError(f"Failed to sync memory after rollback: {sync_exc}") from exc
+
             raise
 
         return cash_flow
@@ -598,6 +615,8 @@ class MockBroker(BrokerProtocol):
         metadata: dict | None = None,
     ) -> CashFlow:
         """출금 처리."""
+        if self._unusable:
+            raise RuntimeError("MockBroker instance is unusable due to previous transaction failure")
         self._validate_amount(amount)
         if currency not in ("KRW", "USD"):
             raise ValueError(f"지원하지 않는 통화: {currency}")
@@ -718,8 +737,16 @@ class MockBroker(BrokerProtocol):
             repo.save_with_connection(self._conn, cash_flow)
 
             self._conn.commit()
-        except Exception:
-            # On error, sync memory with DB before re-raising
+        except Exception as exc:
+            # First rollback the transaction
+            try:
+                self._conn.rollback()
+            except Exception as rollback_exc:
+                # If rollback fails, mark instance as unusable
+                self._unusable = True
+                raise RuntimeError(f"Transaction rollback failed: {rollback_exc}") from exc
+
+            # Then sync memory with DB state after rollback
             try:
                 account_row = self._conn.execute(
                     "SELECT cash_krw, cash_usd FROM mock_account WHERE id = 'default'"
@@ -727,9 +754,13 @@ class MockBroker(BrokerProtocol):
                 if account_row:
                     self._cash_krw = Decimal(account_row["cash_krw"])
                     self._cash_usd = Decimal(account_row["cash_usd"])
-            except Exception:
-                pass
-            self._conn.rollback()
+                else:
+                    raise RuntimeError("Failed to sync memory: mock_account record not found")
+            except Exception as sync_exc:
+                # If sync fails, mark instance as unusable
+                self._unusable = True
+                raise RuntimeError(f"Failed to sync memory after rollback: {sync_exc}") from exc
+
             raise
 
         return cash_flow

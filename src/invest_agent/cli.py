@@ -1106,6 +1106,7 @@ def portfolio_deposit(
         console.print(f"[red]지원하지 않는 통화: {currency}[/red]")
         raise typer.Exit(1)
 
+    broker = None
     try:
         broker = MockBroker(db_path=db_path)
         cash_flow = broker.deposit(
@@ -1113,13 +1114,15 @@ def portfolio_deposit(
             currency=currency,
             idempotency_key=idempotency_key,
         )
-        broker.close()
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]입금 처리 중 오류: {e}[/red]")
         raise typer.Exit(1)
+    finally:
+        if broker:
+            broker.close()
 
     console.print("[green]입금 완료[/green]")
     console.print(f"  ID: {cash_flow.id}")
@@ -1178,6 +1181,7 @@ def portfolio_withdraw(
         console.print(f"[red]지원하지 않는 통화: {currency}[/red]")
         raise typer.Exit(1)
 
+    broker = None
     try:
         broker = MockBroker(db_path=db_path)
         cash_flow = broker.withdraw(
@@ -1185,13 +1189,15 @@ def portfolio_withdraw(
             currency=currency,
             idempotency_key=idempotency_key,
         )
-        broker.close()
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]출금 처리 중 오류: {e}[/red]")
         raise typer.Exit(1)
+    finally:
+        if broker:
+            broker.close()
 
     console.print("[green]출금 완료[/green]")
     console.print(f"  ID: {cash_flow.id}")
@@ -1249,12 +1255,20 @@ def portfolio_cashflows(
         if currency not in ("KRW", "USD"):
             console.print(f"[red]지원하지 않는 통화: {currency}[/red]")
             raise typer.Exit(1)
-        cash_flows = repo.get_by_currency(currency, limit)
-    elif flow_type:
+
+    if flow_type:
         flow_type = flow_type.upper()
         if flow_type not in ("DEPOSIT", "WITHDRAWAL"):
             console.print(f"[red]지원하지 않는 타입: {flow_type}[/red]")
             raise typer.Exit(1)
+
+    if currency and flow_type:
+        # Both filters specified - apply both
+        all_flows = repo.get_latest(limit * 3)  # Fetch more to account for filtering
+        cash_flows = [f for f in all_flows if f.currency == currency and f.flow_type.value == flow_type][:limit]
+    elif currency:
+        cash_flows = repo.get_by_currency(currency, limit)
+    elif flow_type:
         cash_flows = repo.get_by_flow_type(CashFlowType(flow_type), limit)
     else:
         cash_flows = repo.get_latest(limit)

@@ -434,6 +434,14 @@ class MockBroker(BrokerProtocol):
             return True
         return False
 
+    def _validate_amount(self, amount: Decimal) -> None:
+        """금액 유효성 검증."""
+        if amount <= 0:
+            raise ValueError("금액은 양수여야 합니다")
+        # Check for NaN, Infinity
+        if amount.is_nan() or amount.is_infinite():
+            raise ValueError(f"유효하지 않은 금액: {amount}")
+
     def deposit(
         self,
         amount: Decimal,
@@ -443,8 +451,7 @@ class MockBroker(BrokerProtocol):
         metadata: dict | None = None,
     ) -> CashFlow:
         """입금 처리."""
-        if amount <= 0:
-            raise ValueError("입금액은 양수여야 합니다")
+        self._validate_amount(amount)
         if currency not in ("KRW", "USD"):
             raise ValueError(f"지원하지 않는 통화: {currency}")
         if not idempotency_key:
@@ -454,15 +461,11 @@ class MockBroker(BrokerProtocol):
         if not self._db_path:
             raise ValueError("DB 경로가 설정되지 않아 입금할 수 없습니다")
 
+        repo = CashFlowRepository(self._db_path)
+
         now = datetime.now(UTC)
         occurred = occurred_at or now
         recorded = now
-
-        repo = CashFlowRepository(self._db_path)
-
-        existing = repo.get_by_idempotency_key(idempotency_key)
-        if existing:
-            return existing
 
         if currency == "KRW":
             balance_before = self._cash_krw
@@ -484,7 +487,76 @@ class MockBroker(BrokerProtocol):
         )
 
         try:
+            # Acquire write lock first
             self._conn.execute("BEGIN IMMEDIATE")
+
+            # Re-read actual balance from DB after acquiring lock
+            account_row = self._conn.execute(
+                "SELECT cash_krw, cash_usd FROM mock_account WHERE id = 'default'"
+            ).fetchone()
+            if not account_row:
+                raise ValueError("mock_account 레코드가 없습니다: default")
+
+            if currency == "KRW":
+                actual_balance = Decimal(account_row["cash_krw"])
+                if actual_balance != self._cash_krw:
+                    # Sync memory with DB
+                    self._cash_krw = actual_balance
+                balance_before = self._cash_krw
+                balance_after = self._cash_krw + amount
+            else:
+                actual_balance = Decimal(account_row["cash_usd"])
+                if actual_balance != self._cash_usd:
+                    self._cash_usd = actual_balance
+                balance_before = self._cash_usd
+                balance_after = self._cash_usd + amount
+
+            # Update cash_flow with actual balances
+            cash_flow = CashFlow(
+                idempotency_key=idempotency_key,
+                occurred_at=occurred,
+                recorded_at=datetime.now(UTC),  # recorded_at is when transaction commits
+                flow_type=CashFlowType.DEPOSIT,
+                currency=currency,
+                amount=amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                metadata=metadata or {},
+            )
+
+            # Check for idempotency conflict within transaction
+            existing_row = self._conn.execute(
+                "SELECT * FROM cash_flows WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing_row:
+                # Verify it's the same request
+                if (existing_row["flow_type"] != cash_flow.flow_type.value or
+                    existing_row["currency"] != cash_flow.currency or
+                    Decimal(existing_row["amount"]) != cash_flow.amount):
+                    raise ValueError(
+                        f"Idempotency key '{cash_flow.idempotency_key}' already exists "
+                        f"with different request (type: {existing_row['flow_type']} vs {cash_flow.flow_type.value}, "
+                        f"currency: {existing_row['currency']} vs {cash_flow.currency}, "
+                        f"amount: {existing_row['amount']} vs {cash_flow.amount})"
+                    )
+                # Same request - return existing (idempotent)
+                import json
+                from uuid import UUID
+
+                from invest_agent.domain.models import CashFlow as CFModel
+                return CFModel(
+                    id=UUID(existing_row["id"]),
+                    idempotency_key=existing_row["idempotency_key"],
+                    occurred_at=datetime.fromisoformat(existing_row["occurred_at"]),
+                    recorded_at=datetime.fromisoformat(existing_row["recorded_at"]),
+                    flow_type=CashFlowType(existing_row["flow_type"]),
+                    currency=existing_row["currency"],
+                    amount=Decimal(existing_row["amount"]),
+                    balance_before=Decimal(existing_row["balance_before"]),
+                    balance_after=Decimal(existing_row["balance_after"]),
+                    metadata=json.loads(existing_row["metadata"]) if existing_row["metadata"] else {},
+                )
 
             if currency == "KRW":
                 self._cash_krw = balance_after
@@ -510,8 +582,7 @@ class MockBroker(BrokerProtocol):
         metadata: dict | None = None,
     ) -> CashFlow:
         """출금 처리."""
-        if amount <= 0:
-            raise ValueError("출금액은 양수여야 합니다")
+        self._validate_amount(amount)
         if currency not in ("KRW", "USD"):
             raise ValueError(f"지원하지 않는 통화: {currency}")
         if not idempotency_key:
@@ -521,15 +592,10 @@ class MockBroker(BrokerProtocol):
         if not self._db_path:
             raise ValueError("DB 경로가 설정되지 않아 출금할 수 없습니다")
 
-        now = datetime.now(UTC)
-        occurred = occurred_at or now
-        recorded = now
-
         repo = CashFlowRepository(self._db_path)
 
-        existing = repo.get_by_idempotency_key(idempotency_key)
-        if existing:
-            return existing
+        now = datetime.now(UTC)
+        occurred = occurred_at or now
 
         if currency == "KRW":
             balance_before = self._cash_krw
@@ -545,7 +611,7 @@ class MockBroker(BrokerProtocol):
         cash_flow = CashFlow(
             idempotency_key=idempotency_key,
             occurred_at=occurred,
-            recorded_at=recorded,
+            recorded_at=datetime.now(UTC),
             flow_type=CashFlowType.WITHDRAWAL,
             currency=currency,
             amount=amount,
@@ -555,7 +621,79 @@ class MockBroker(BrokerProtocol):
         )
 
         try:
+            # Acquire write lock first
             self._conn.execute("BEGIN IMMEDIATE")
+
+            # Re-read actual balance from DB after acquiring lock
+            account_row = self._conn.execute(
+                "SELECT cash_krw, cash_usd FROM mock_account WHERE id = 'default'"
+            ).fetchone()
+            if not account_row:
+                raise ValueError("mock_account 레코드가 없습니다: default")
+
+            if currency == "KRW":
+                actual_balance = Decimal(account_row["cash_krw"])
+                if actual_balance != self._cash_krw:
+                    self._cash_krw = actual_balance
+                balance_before = self._cash_krw
+                if balance_before < amount:
+                    raise ValueError(f"KRW 잔고 부족: {balance_before} < {amount}")
+                balance_after = self._cash_krw - amount
+            else:
+                actual_balance = Decimal(account_row["cash_usd"])
+                if actual_balance != self._cash_usd:
+                    self._cash_usd = actual_balance
+                balance_before = self._cash_usd
+                if balance_before < amount:
+                    raise ValueError(f"USD 잔고 부족: {balance_before} < {amount}")
+                balance_after = self._cash_usd - amount
+
+            # Update cash_flow with actual balances
+            cash_flow = CashFlow(
+                idempotency_key=idempotency_key,
+                occurred_at=occurred,
+                recorded_at=datetime.now(UTC),
+                flow_type=CashFlowType.WITHDRAWAL,
+                currency=currency,
+                amount=amount,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                metadata=metadata or {},
+            )
+
+            # Check for idempotency conflict within transaction
+            existing_row = self._conn.execute(
+                "SELECT * FROM cash_flows WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing_row:
+                # Verify it's the same request
+                if (existing_row["flow_type"] != cash_flow.flow_type.value or
+                    existing_row["currency"] != cash_flow.currency or
+                    Decimal(existing_row["amount"]) != cash_flow.amount):
+                    raise ValueError(
+                        f"Idempotency key '{cash_flow.idempotency_key}' already exists "
+                        f"with different request (type: {existing_row['flow_type']} vs {cash_flow.flow_type.value}, "
+                        f"currency: {existing_row['currency']} vs {cash_flow.currency}, "
+                        f"amount: {existing_row['amount']} vs {cash_flow.amount})"
+                    )
+                # Same request - return existing (idempotent)
+                import json
+                from uuid import UUID
+
+                from invest_agent.domain.models import CashFlow as CFModel
+                return CFModel(
+                    id=UUID(existing_row["id"]),
+                    idempotency_key=existing_row["idempotency_key"],
+                    occurred_at=datetime.fromisoformat(existing_row["occurred_at"]),
+                    recorded_at=datetime.fromisoformat(existing_row["recorded_at"]),
+                    flow_type=CashFlowType(existing_row["flow_type"]),
+                    currency=existing_row["currency"],
+                    amount=Decimal(existing_row["amount"]),
+                    balance_before=Decimal(existing_row["balance_before"]),
+                    balance_after=Decimal(existing_row["balance_after"]),
+                    metadata=json.loads(existing_row["metadata"]) if existing_row["metadata"] else {},
+                )
 
             if currency == "KRW":
                 self._cash_krw = balance_after

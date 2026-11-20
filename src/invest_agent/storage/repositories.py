@@ -811,22 +811,38 @@ class CashFlowRepository:
             conn.close()
 
     def _execute_save(self, conn, cash_flow: CashFlow) -> None:
-        """입출금 기록 저장 (기존 연결 사용)."""
+        """입출금 기록 저장 (기존 연결 사용).
+
+        동일한 idempotency_key가 이미 존재하는 경우:
+        - 동일한 요청(금액, 통화, 유형)이면 기존 레코드 반환
+        - 다른 요청이면 예외 발생
+        """
+        # Check for existing record within the same transaction
+        existing_row = conn.execute(
+            "SELECT * FROM cash_flows WHERE idempotency_key = ?",
+            (cash_flow.idempotency_key,),
+        ).fetchone()
+
+        if existing_row:
+            # Verify it's the same request
+            if (existing_row["flow_type"] != cash_flow.flow_type.value or
+                existing_row["currency"] != cash_flow.currency or
+                Decimal(existing_row["amount"]) != cash_flow.amount):
+                raise ValueError(
+                    f"Idempotency key '{cash_flow.idempotency_key}' already exists "
+                    f"with different request (type: {existing_row['flow_type']} vs {cash_flow.flow_type.value}, "
+                    f"currency: {existing_row['currency']} vs {cash_flow.currency}, "
+                    f"amount: {existing_row['amount']} vs {cash_flow.amount})"
+                )
+            # Same request - return existing (idempotent)
+            return
+
+        # New record - INSERT only (no ON CONFLICT DO UPDATE)
         conn.execute(
             """
             INSERT INTO cash_flows
             (id, idempotency_key, occurred_at, recorded_at, flow_type, currency, amount, balance_before, balance_after, metadata)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(idempotency_key) DO UPDATE SET
-                id=excluded.id,
-                occurred_at=excluded.occurred_at,
-                recorded_at=excluded.recorded_at,
-                flow_type=excluded.flow_type,
-                currency=excluded.currency,
-                amount=excluded.amount,
-                balance_before=excluded.balance_before,
-                balance_after=excluded.balance_after,
-                metadata=excluded.metadata
             """,
             (
                 str(cash_flow.id),

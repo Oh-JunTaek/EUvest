@@ -436,11 +436,15 @@ class MockBroker(BrokerProtocol):
 
     def _validate_amount(self, amount: Decimal) -> None:
         """금액 유효성 검증."""
+        # Check Decimal type
+        if not isinstance(amount, Decimal):
+            raise TypeError(f"금액은 Decimal 타입이어야 합니다: {type(amount)}")
+        # Check for NaN, Infinity, -Infinity
+        if not amount.is_finite():
+            raise ValueError(f"유효하지 않은 금액: {amount}")
+        # Check positive
         if amount <= 0:
             raise ValueError("금액은 양수여야 합니다")
-        # Check for NaN, Infinity
-        if amount.is_nan() or amount.is_infinite():
-            raise ValueError(f"유효하지 않은 금액: {amount}")
 
     def deposit(
         self,
@@ -515,7 +519,7 @@ class MockBroker(BrokerProtocol):
             cash_flow = CashFlow(
                 idempotency_key=idempotency_key,
                 occurred_at=occurred,
-                recorded_at=datetime.now(UTC),  # recorded_at is when transaction commits
+                recorded_at=datetime.now(UTC),
                 flow_type=CashFlowType.DEPOSIT,
                 currency=currency,
                 amount=amount,
@@ -545,7 +549,7 @@ class MockBroker(BrokerProtocol):
                 from uuid import UUID
 
                 from invest_agent.domain.models import CashFlow as CFModel
-                return CFModel(
+                result = CFModel(
                     id=UUID(existing_row["id"]),
                     idempotency_key=existing_row["idempotency_key"],
                     occurred_at=datetime.fromisoformat(existing_row["occurred_at"]),
@@ -557,6 +561,8 @@ class MockBroker(BrokerProtocol):
                     balance_after=Decimal(existing_row["balance_after"]),
                     metadata=json.loads(existing_row["metadata"]) if existing_row["metadata"] else {},
                 )
+                self._conn.commit()
+                return result
 
             if currency == "KRW":
                 self._cash_krw = balance_after
@@ -568,6 +574,16 @@ class MockBroker(BrokerProtocol):
 
             self._conn.commit()
         except Exception:
+            # On error, sync memory with DB before re-raising
+            try:
+                account_row = self._conn.execute(
+                    "SELECT cash_krw, cash_usd FROM mock_account WHERE id = 'default'"
+                ).fetchone()
+                if account_row:
+                    self._cash_krw = Decimal(account_row["cash_krw"])
+                    self._cash_usd = Decimal(account_row["cash_usd"])
+            except Exception:
+                pass
             self._conn.rollback()
             raise
 
@@ -599,13 +615,9 @@ class MockBroker(BrokerProtocol):
 
         if currency == "KRW":
             balance_before = self._cash_krw
-            if balance_before < amount:
-                raise ValueError(f"KRW 잔고 부족: {balance_before} < {amount}")
             balance_after = self._cash_krw - amount
         else:
             balance_before = self._cash_usd
-            if balance_before < amount:
-                raise ValueError(f"USD 잔고 부족: {balance_before} < {amount}")
             balance_after = self._cash_usd - amount
 
         cash_flow = CashFlow(
@@ -682,7 +694,7 @@ class MockBroker(BrokerProtocol):
                 from uuid import UUID
 
                 from invest_agent.domain.models import CashFlow as CFModel
-                return CFModel(
+                result = CFModel(
                     id=UUID(existing_row["id"]),
                     idempotency_key=existing_row["idempotency_key"],
                     occurred_at=datetime.fromisoformat(existing_row["occurred_at"]),
@@ -694,6 +706,8 @@ class MockBroker(BrokerProtocol):
                     balance_after=Decimal(existing_row["balance_after"]),
                     metadata=json.loads(existing_row["metadata"]) if existing_row["metadata"] else {},
                 )
+                self._conn.commit()
+                return result
 
             if currency == "KRW":
                 self._cash_krw = balance_after
@@ -705,6 +719,16 @@ class MockBroker(BrokerProtocol):
 
             self._conn.commit()
         except Exception:
+            # On error, sync memory with DB before re-raising
+            try:
+                account_row = self._conn.execute(
+                    "SELECT cash_krw, cash_usd FROM mock_account WHERE id = 'default'"
+                ).fetchone()
+                if account_row:
+                    self._cash_krw = Decimal(account_row["cash_krw"])
+                    self._cash_usd = Decimal(account_row["cash_usd"])
+            except Exception:
+                pass
             self._conn.rollback()
             raise
 

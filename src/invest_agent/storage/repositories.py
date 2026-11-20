@@ -810,13 +810,14 @@ class CashFlowRepository:
         finally:
             conn.close()
 
-    def _execute_save(self, conn, cash_flow: CashFlow) -> None:
+    def _execute_save(self, conn, cash_flow: CashFlow) -> CashFlow | None:
         """입출금 기록 저장 (기존 연결 사용).
 
         동일한 idempotency_key가 이미 존재하는 경우:
         - 동일한 요청(금액, 통화, 유형)이면 기존 레코드 반환
         - 다른 요청이면 예외 발생
         """
+        import json
         # Check for existing record within the same transaction
         existing_row = conn.execute(
             "SELECT * FROM cash_flows WHERE idempotency_key = ?",
@@ -835,7 +836,22 @@ class CashFlowRepository:
                     f"amount: {existing_row['amount']} vs {cash_flow.amount})"
                 )
             # Same request - return existing (idempotent)
-            return
+            import json
+            from uuid import UUID
+
+            from invest_agent.domain.models import CashFlow as CFModel
+            return CFModel(
+                id=UUID(existing_row["id"]),
+                idempotency_key=existing_row["idempotency_key"],
+                occurred_at=datetime.fromisoformat(existing_row["occurred_at"]),
+                recorded_at=datetime.fromisoformat(existing_row["recorded_at"]),
+                flow_type=CashFlowType(existing_row["flow_type"]),
+                currency=existing_row["currency"],
+                amount=Decimal(existing_row["amount"]),
+                balance_before=Decimal(existing_row["balance_before"]),
+                balance_after=Decimal(existing_row["balance_after"]),
+                metadata=json.loads(existing_row["metadata"]) if existing_row["metadata"] else {},
+            )
 
         # New record - INSERT only (no ON CONFLICT DO UPDATE)
         conn.execute(
@@ -858,15 +874,17 @@ class CashFlowRepository:
             ),
         )
 
-    def save(self, cash_flow: CashFlow) -> None:
+    def save(self, cash_flow: CashFlow) -> CashFlow | None:
         """입출금 기록 저장."""
         with self._conn() as conn:
-            self._execute_save(conn, cash_flow)
+            result = self._execute_save(conn, cash_flow)
             conn.commit()
+            return result
 
-    def save_with_connection(self, conn, cash_flow: CashFlow) -> None:
+    def save_with_connection(self, conn, cash_flow: CashFlow) -> CashFlow | None:
         """입출금 기록 저장 (기존 연결 사용)."""
-        self._execute_save(conn, cash_flow)
+        result = self._execute_save(conn, cash_flow)
+        return result
 
     def get(self, cash_flow_id: UUID) -> CashFlow | None:
         """ID로 입출금 기록 조회."""

@@ -16,6 +16,7 @@ from invest_agent.domain.models import CashFlowType
 from invest_agent.market.ingestion import OHLCVIngestionService
 from invest_agent.market.market_data import Market
 from invest_agent.operations.health import check_health
+from invest_agent.performance import analyze_portfolio_performance, format_performance_report
 from invest_agent.portfolio import calculate_portfolio_valuation
 from invest_agent.reporting.daily import save_daily_report
 from invest_agent.runtime.orchestrator import create_orchestrator
@@ -1310,6 +1311,52 @@ def portfolio_cashflows(
 
     console.print(table)
     console.print()
+
+
+console.print()
+
+
+@portfolio_app.command("performance")
+def portfolio_performance(
+    limit: int = typer.Option(
+        30,
+        "--limit",
+        "-l",
+        help="조회할 구간 개수 (기본값: 30)",
+        min=1,
+        max=100,
+    ),
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+) -> None:
+    """포트폴리오 입출금 조정 성과 분석.
+
+    포트폴리오 스냅샷과 입출금 원장을 결합하여
+    두 평가 시점 사이의 외부 입출금을 제외한 자산 변화액을 분석합니다.
+
+    예시:
+        uv run invest portfolio performance --db data/agent.db
+        uv run invest portfolio performance --db data/agent.db --limit 10
+    """
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        intervals = analyze_portfolio_performance(db_path, limit)
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]성과 분석 중 오류: {e}[/red]")
+        raise typer.Exit(1)
+
+    report = format_performance_report(intervals)
+    console.print(report)
 
 
 if __name__ == "__main__":

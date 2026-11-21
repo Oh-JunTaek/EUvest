@@ -2,30 +2,26 @@
 
 from __future__ import annotations
 
-import tempfile
 import os
-from datetime import datetime, UTC
+import tempfile
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
-import pytest
-
 from invest_agent.domain.models import (
-    PortfolioSnapshot,
     CashFlow,
     CashFlowType,
+    PortfolioSnapshot,
 )
-from invest_agent.storage.repositories import (
-    PortfolioSnapshotRepository,
-    CashFlowRepository,
-)
-from invest_agent.storage.schema import ensure_db
 from invest_agent.performance import (
     analyze_portfolio_performance,
-    format_performance_report,
-    PerformanceInterval,
 )
+from invest_agent.storage.repositories import (
+    CashFlowRepository,
+    PortfolioSnapshotRepository,
+)
+from invest_agent.storage.schema import ensure_db
 
 
 class TestPerformanceAnalysis:

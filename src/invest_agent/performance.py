@@ -1,7 +1,6 @@
 """포트폴리오 성과 분석 모듈.
 
-OFFLINE_SIM 환경에서 포트폴리오 스냅샷과 입출금 원장을 결합하여
-입출금 조정된 자산 변화액을 분석한다.
+스냅샷과 입출금 원장을 결합하여 입출금 조정된 성과를 계산한다.
 """
 
 from __future__ import annotations
@@ -10,19 +9,13 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from invest_agent.domain.models import CashFlow, CashFlowType, PortfolioSnapshot
-from invest_agent.storage.repositories import (
-    CashFlowRepository,
-    PortfolioSnapshotRepository,
-)
-
 
 @dataclass(slots=True)
 class PerformanceInterval:
     """성과 분석 구간."""
 
-    start_snapshot: PortfolioSnapshot
-    end_snapshot: PortfolioSnapshot
+    start_snapshot: object
+    end_snapshot: object
     start_cashflows: list
     end_cashflows: list
 
@@ -36,28 +29,35 @@ class PerformanceInterval:
     non_calculable_reasons: list[str]
 
 
-def _sum_cashflows_by_currency(cashflows: list[CashFlow], currency: str) -> tuple[Decimal, Decimal]:
+def _sum_cashflows_by_currency(cashflows: list, currency: str) -> tuple[Decimal, Decimal]:
     """특정 통화의 입금/출금 합계.
 
+    Args:
+        cashflows: 현금흐름 리스트
+        currency: 통화 코드 (KRW, USD)
+
     Returns:
-        (total_deposits, total_withdrawals)
+        (총입금액, 총출금액)
     """
     deposits = Decimal("0")
     withdrawals = Decimal("0")
     for cf in cashflows:
         if cf.currency == currency:
-            if cf.flow_type == CashFlowType.DEPOSIT:
+            if cf.flow_type == "DEPOSIT":
                 deposits += cf.amount
-            elif cf.flow_type == CashFlowType.WITHDRAWAL:
+            elif cf.flow_type == "WITHDRAWAL":
                 withdrawals += cf.amount
     return deposits, withdrawals
 
 
-def _check_snapshot_completeness(snapshot: PortfolioSnapshot) -> tuple[bool, list[str]]:
+def _check_snapshot_completeness(snapshot: object) -> tuple[bool, list[str]]:
     """스냅샷 완전성 검증.
 
+    Args:
+        snapshot: 포트폴리오 스냅샷
+
     Returns:
-        (is_complete, reasons_if_incomplete)
+        (완전여부, 불완전사유리스트)
     """
     reasons = []
     if not snapshot.equity_complete:
@@ -65,11 +65,15 @@ def _check_snapshot_completeness(snapshot: PortfolioSnapshot) -> tuple[bool, lis
     if snapshot.total_equity < 0:
         reasons.append("총평가액이 음수")
     return len(reasons) == 0, reasons
+
+
 def analyze_portfolio_performance(
-    db_path: str | Path,
+    db_path: str,
     limit: int = 30,
 ) -> list[PerformanceInterval]:
     """포트폴리오 성과 분석.
+
+    연속된 두 스냅샷 구간별로 입출금 조정 성과를 계산한다.
 
     Args:
         db_path: SQLite DB 경로
@@ -78,27 +82,32 @@ def analyze_portfolio_performance(
     Returns:
         최신순으로 정렬된 PerformanceInterval 리스트
     """
+    from invest_agent.storage.repositories import (
+        CashFlowRepository,
+        PortfolioSnapshotRepository,
+    )
+
+    # DB 파일 확인
     if not Path(db_path).exists():
         raise FileNotFoundError(f"DB 파일이 없습니다: {db_path}")
 
+    # 리포지토리 초기화
     snapshot_repo = PortfolioSnapshotRepository(db_path)
     cashflow_repo = CashFlowRepository(db_path)
 
+    # 전체 스냅샷 조회 (최신순)
     snapshots = snapshot_repo.get_all()
-    if not snapshots:
+    if len(snapshots) < 2:
         return []
 
+    # 전체 입출금 조회 (최신순)
     cashflows = cashflow_repo.get_all()
-    if not cashflows:
-        return []
-
-    # 현금흐름을 occurred_at 기준으로 정렬 (최신순)
     cashflows_sorted = sorted(cashflows, key=lambda cf: cf.occurred_at, reverse=True)
 
     intervals = []
 
     # 스냅샷은 이미 최신순으로 정렬되어 있음 (get_all() 반환)
-    for i in range(min(limit, len(snapshots))):
+    for i in range(min(limit, len(snapshots) - 1)):
         end_snap = snapshots[i]
 
         # 시작 스냅샷 찾기 (더 과거의 스냅샷)
@@ -110,6 +119,10 @@ def analyze_portfolio_performance(
 
         if not start_snap:
             break
+
+        # 구간 경계 검증
+        if start_snap.timestamp >= end_snap.timestamp:
+            continue  # 유효하지 않은 구간 건너뛰기
 
         # 구간에 속하는 현금흐름 필터링 (start < cf <= end)
         interval_cashflows = [
@@ -149,9 +162,9 @@ def analyze_portfolio_performance(
         interval_withdrawals_krw = Decimal("0")
         for cf in interval_cashflows:
             if cf.currency == "KRW":
-                if cf.flow_type == CashFlowType.DEPOSIT:
+                if cf.flow_type == "DEPOSIT":
                     interval_deposits_krw += cf.amount
-                elif cf.flow_type == CashFlowType.WITHDRAWAL:
+                elif cf.flow_type == "WITHDRAWAL":
                     interval_withdrawals_krw += cf.amount
 
         net_external_flow = interval_deposits_krw - interval_withdrawals_krw
@@ -177,9 +190,16 @@ def analyze_portfolio_performance(
 
 
 def format_performance_report(intervals: list[PerformanceInterval]) -> str:
-    """성과 분석 결과를 사람이 읽기 쉬운 문자열로 포맷."""
+    """성과 분석 결과를 사람이 읽기 쉬운 문자열로 포맷.
+
+    Args:
+        intervals: 분석 구간 리스트
+
+    Returns:
+        포맷된 리포트 문자열
+    """
     if not intervals:
-        return "분석할 구간이 없습니다."
+        return "분석할 구간이 없습니다. (스냅샷이 2개 미만입니다.)"
 
     lines = []
     lines.append("[bold cyan]포트폴리오 성과 분석 (입출금 조정)[/bold cyan]")
@@ -191,14 +211,14 @@ def format_performance_report(intervals: list[PerformanceInterval]) -> str:
         end_ts = interval.end_snapshot.timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
         lines.append(f"[bold]구간 {i + 1}: {start_ts} ~ {end_ts}[/bold]")
-        lines.append(f"  시작 평가액: {interval.start_value:,.0f} KRW")
-        lines.append(f"  종료 평가액: {interval.end_value:,.0f} KRW")
-        lines.append(f"  총 입금액: {interval.total_deposits_krw:,.0f} KRW")
-        lines.append(f"  총 출금액: {interval.total_withdrawals_krw:,.0f} KRW")
-        lines.append(f"  순외부현금흐름: {interval.net_external_flow:+,0f} KRW")
+        lines.append(f"  시작 평가액: {float(interval.start_value):,.0f} KRW")
+        lines.append(f"  종료 평가액: {float(interval.end_value):,.0f} KRW")
+        lines.append(f"  총 입금액: {float(interval.total_deposits_krw):,.0f} KRW")
+        lines.append(f"  총 출금액: {float(interval.total_withdrawals_krw):,.0f} KRW")
+        lines.append(f"  순외부현금흐름: {float(interval.net_external_flow):+,} KRW")
 
         if interval.calculable:
-            lines.append(f"  [green]입출금 조정 자산 변화액: {interval.adjusted_change:+,0f} KRW[/green]")
+            lines.append(f"  [green]입출금 조정 자산 변화액: {float(interval.adjusted_change):+,} KRW[/green]")
         else:
             lines.append("  [yellow]입출금 조정 자산 변화액: 계산 불가[/yellow]")
             for reason in interval.non_calculable_reasons:

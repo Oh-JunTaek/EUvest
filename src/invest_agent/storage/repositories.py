@@ -929,6 +929,28 @@ class CashFlowRepository:
             ).fetchall()
             return [self._row_to_cash_flow(row) for row in rows]
 
+    def get_all(self) -> list[CashFlow]:
+        """전체 입출금 기록 조회 (최신순)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cash_flows ORDER BY occurred_at DESC"
+            ).fetchall()
+            return [self._row_to_cash_flow(row) for row in rows]
+
+    def get_by_time_range(
+        self,
+        start: datetime,
+        end: datetime,
+        limit: int = 100,
+    ) -> list[CashFlow]:
+        """특정 기간 내 입출금 기록 조회 (start < occurred_at <= end)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cash_flows WHERE occurred_at > ? AND occurred_at <= ? ORDER BY occurred_at DESC LIMIT ?",
+                (start.isoformat(), end.isoformat(), limit),
+            ).fetchall()
+            return [self._row_to_cash_flow(row) for row in rows]
+
     def _row_to_cash_flow(self, row: sqlite3.Row) -> CashFlow:
         return CashFlow(
             id=UUID(row["id"]),

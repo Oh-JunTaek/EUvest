@@ -1359,5 +1359,87 @@ def portfolio_performance(
     console.print(report)
 
 
+@portfolio_app.command("benchmark")
+def portfolio_benchmark(
+    limit: int = typer.Option(
+        30,
+        "--limit",
+        "-l",
+        help="비교할 평가 구간 개수 (기본값: 30)",
+        min=1,
+        max=100,
+    ),
+    db_path: str = typer.Option(
+        "data/agent.db",
+        "--db",
+        "-d",
+        help="SQLite DB 경로",
+    ),
+    benchmark: str = typer.Option(
+        "all",
+        "--benchmark",
+        "-b",
+        help="비교할 벤치마크 (KOSPI200, SP500, all)",
+        case_sensitive=False,
+    ),
+    provider: str | None = typer.Option(
+        None,
+        "--provider",
+        "-p",
+        help="데이터 공급자 (기본값: 자동)",
+    ),
+    max_freshness_days: int = typer.Option(
+        5,
+        "--max-freshness-days",
+        help="벤치마크 데이터 최대 허용 경과 일수 (기본값: 5)",
+        min=0,
+        max=30,
+    ),
+) -> None:
+    """포트폴리오 수익률을 시장 벤치마크(KOSPI 200, S&P 500)와 비교.
+
+    EUvest Modified Dietz 수익률과 벤치마크 단순 보유 수익률을 비교하여
+    초과수익률(%p)을 계산합니다.
+
+    예시:
+        uv run invest portfolio benchmark --db data/agent.db
+        uv run invest portfolio benchmark --db data/agent.db --benchmark KOSPI200
+        uv run invest portfolio benchmark --db data/agent.db --limit 10 --max-freshness-days 10
+    """
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    # 벤치마크 검증
+    bench_list = []
+    if benchmark.lower() == "all":
+        bench_list = ["KOSPI200", "SP500"]
+    elif benchmark.upper() in ("KOSPI200", "SP500"):
+        bench_list = [benchmark.upper()]
+    else:
+        console.print(f"[red]지원하지 않는 벤치마크: {benchmark}[/red]")
+        console.print("지원: KOSPI200, SP500, all")
+        raise typer.Exit(1)
+
+    try:
+        from invest_agent.benchmark import compare_with_benchmarks, format_benchmark_report
+        results = compare_with_benchmarks(
+            db_path=db_path,
+            limit=limit,
+            benchmarks=bench_list,
+            provider=provider,
+            max_freshness_days=max_freshness_days,
+        )
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]벤치마크 비교 중 오류: {e}[/red]")
+        raise typer.Exit(1)
+
+    report = format_benchmark_report(results)
+    console.print(report)
+
+
 if __name__ == "__main__":
     app()

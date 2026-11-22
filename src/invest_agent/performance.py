@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -24,7 +25,9 @@ class PerformanceInterval:
     total_deposits_krw: Decimal
     total_withdrawals_krw: Decimal
     net_external_flow: Decimal
+    weighted_external_flow: Decimal
     adjusted_change: Decimal | None
+    period_return_pct: Decimal | None
     calculable: bool
     non_calculable_reasons: list[str]
 
@@ -48,6 +51,73 @@ def _sum_cashflows_by_currency(cashflows: list, currency: str) -> tuple[Decimal,
             elif cf.flow_type == "WITHDRAWAL":
                 withdrawals += cf.amount
     return deposits, withdrawals
+
+
+def _calculate_modified_dietz_return(
+    start_value: Decimal,
+    end_value: Decimal,
+    cashflows: list,
+    start_time: datetime,
+    end_time: datetime,
+) -> tuple[Decimal | None, Decimal | None, list[str]]:
+    """Modified Dietz 방식 기간 수익률 계산.
+
+    Args:
+        start_value: 기간 시작 평가액
+        end_value: 기간 종료 평가액
+        cashflows: 구간 내 현금흐름 리스트 (start < cf <= end)
+        start_time: 구간 시작 시각
+        end_time: 구간 종료 시각
+
+    Returns:
+        (period_return_pct, weighted_external_flow, non_calculable_reasons)
+        계산 불가 시 (None, None, reasons)
+    """
+    reasons = []
+
+    # 총 기간 (초 단위)
+    total_seconds = (end_time - start_time).total_seconds()
+    if total_seconds <= 0:
+        reasons.append("구간 길이가 0 이하")
+        return None, None, reasons
+
+    # 가중 외부 현금흐름 계산
+    weighted_flow = Decimal("0")
+    for cf in cashflows:
+        if cf.currency != "KRW":
+            continue
+        # 현금흐름 발생 이후 남은 기간의 비율
+        elapsed = (cf.occurred_at - start_time).total_seconds()
+        if elapsed < 0:
+            elapsed = Decimal("0")
+        weight = Decimal(str(1 - elapsed / total_seconds))
+        if cf.flow_type == "DEPOSIT":
+            weighted_flow += cf.amount * weight
+        elif cf.flow_type == "WITHDRAWAL":
+            weighted_flow -= cf.amount * weight
+
+    # 분모: 시작 평가액 + 가중 외부 현금흐름
+    denominator = start_value + weighted_flow
+
+    if denominator <= 0:
+        reasons.append("분모가 0 이하 (시작 평가액 + 가중 외부 현금흐름)")
+        return None, None, reasons
+
+    # 분자: 종료 평가액 - 시작 평가액 - 순 외부 현금흐름 (KRW만)
+    net_external_flow_krw = Decimal("0")
+    for cf in cashflows:
+        if cf.currency == "KRW":
+            if cf.flow_type == "DEPOSIT":
+                net_external_flow_krw += cf.amount
+            elif cf.flow_type == "WITHDRAWAL":
+                net_external_flow_krw -= cf.amount
+
+    numerator = end_value - start_value - net_external_flow_krw
+
+    # 수익률 계산 (소수점 4자리까지)
+    period_return = (numerator / denominator * Decimal("100")).quantize(Decimal("0.0001"))
+
+    return period_return, weighted_flow.quantize(Decimal("0.01")), []
 
 
 def _check_snapshot_completeness(snapshot: object) -> tuple[bool, list[str]]:
@@ -170,6 +240,22 @@ def analyze_portfolio_performance(
         net_external_flow = interval_deposits_krw - interval_withdrawals_krw
         adjusted_change = end_value - start_value - net_external_flow if calculable else None
 
+        # Modified Dietz 수익률 계산
+        weighted_external_flow = Decimal("0")
+        period_return_pct = None
+        if calculable:
+            period_return_pct, weighted_external_flow, dietz_reasons = _calculate_modified_dietz_return(
+                start_value=start_value,
+                end_value=end_value,
+                cashflows=interval_cashflows,
+                start_time=start_snap.timestamp,
+                end_time=end_snap.timestamp,
+            )
+            if dietz_reasons:
+                calculable = False
+                period_return_pct = None
+                non_calculable_reasons.extend(dietz_reasons)
+
         interval = PerformanceInterval(
             start_snapshot=start_snap,
             end_snapshot=end_snap,
@@ -180,7 +266,9 @@ def analyze_portfolio_performance(
             total_deposits_krw=interval_deposits_krw,
             total_withdrawals_krw=interval_withdrawals_krw,
             net_external_flow=net_external_flow,
+            weighted_external_flow=weighted_external_flow,
             adjusted_change=adjusted_change,
+            period_return_pct=period_return_pct,
             calculable=calculable,
             non_calculable_reasons=non_calculable_reasons,
         )
@@ -211,16 +299,24 @@ def format_performance_report(intervals: list[PerformanceInterval]) -> str:
         end_ts = interval.end_snapshot.timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
         lines.append(f"[bold]구간 {i + 1}: {start_ts} ~ {end_ts}[/bold]")
-        lines.append(f"  시작 평가액: {float(interval.start_value):,.0f} KRW")
-        lines.append(f"  종료 평가액: {float(interval.end_value):,.0f} KRW")
-        lines.append(f"  총 입금액: {float(interval.total_deposits_krw):,.0f} KRW")
-        lines.append(f"  총 출금액: {float(interval.total_withdrawals_krw):,.0f} KRW")
-        lines.append(f"  순외부현금흐름: {float(interval.net_external_flow):+,} KRW")
+        lines.append(f"  시작 평가액: {interval.start_value:,.0f} KRW")
+        lines.append(f"  종료 평가액: {interval.end_value:,.0f} KRW")
+        lines.append(f"  총 입금액: {interval.total_deposits_krw:,.0f} KRW")
+        lines.append(f"  총 출금액: {interval.total_withdrawals_krw:,.0f} KRW")
+        lines.append(f"  순외부현금흐름: {interval.net_external_flow:+,} KRW")
 
         if interval.calculable:
-            lines.append(f"  [green]입출금 조정 자산 변화액: {float(interval.adjusted_change):+,} KRW[/green]")
+            lines.append(f"  가중 외부 현금흐름: {interval.weighted_external_flow:+,} KRW")
+            lines.append(f"  입출금 조정 자산 변화액: {interval.adjusted_change:+,} KRW")
+            if interval.period_return_pct is not None:
+                lines.append(f"  [green]Modified Dietz 기간 수익률: {interval.period_return_pct:+.4f}%[/green]")
+            else:
+                lines.append("  [yellow]Modified Dietz 기간 수익률: 계산 불가[/yellow]")
+            lines.append("  계산 방법: Modified Dietz (시간 가중 현금흐름)")
         else:
-            lines.append("  [yellow]입출금 조정 자산 변화액: 계산 불가[/yellow]")
+            lines.append("  가중 외부 현금흐름: 계산 불가")
+            lines.append("  입출금 조정 자산 변화액: 계산 불가")
+            lines.append("  Modified Dietz 기간 수익률: 계산 불가")
             for reason in interval.non_calculable_reasons:
                 lines.append(f"    - {reason}")
 

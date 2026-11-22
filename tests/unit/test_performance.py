@@ -127,32 +127,8 @@ class TestPerformanceAnalysis:
         assert interval.total_withdrawals_krw == Decimal("1000000")
         assert interval.net_external_flow == Decimal("-1000000")
         assert interval.adjusted_change == Decimal("0")
-    def test_mixed_deposit_withdrawal(self):
-        """입출금 혼합: 순외부현금흐름 기준 조정."""
-        t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
-        t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
-        self._create_snapshot(t1, Decimal("100000000"))
-        self._create_snapshot(t2, Decimal("101500000"))
-        self._create_cashflow(
-            datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC),
-            CashFlowType.DEPOSIT, "KRW", Decimal("2000000")
-        )
-        self._create_cashflow(
-            datetime(2025, 1, 1, 14, 0, 0, tzinfo=UTC),
-            CashFlowType.WITHDRAWAL, "KRW", Decimal("500000")
-        )
-
-        intervals = analyze_portfolio_performance(str(self.db_path))
-        assert len(intervals) == 1
-        interval = intervals[0]
-        assert interval.calculable is True
-        assert interval.total_deposits_krw == Decimal("2000000")
-        assert interval.total_withdrawals_krw == Decimal("500000")
-        assert interval.net_external_flow == Decimal("1500000")
-        assert interval.adjusted_change == Decimal("0")
 
     def test_usd_cashflow_non_calculable(self):
-        """USD 입출금: 환율 근거 없으면 계산 불가."""
         t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
         self._create_snapshot(t1, Decimal("100000000"))
@@ -170,7 +146,6 @@ class TestPerformanceAnalysis:
         assert any("USD" in r for r in interval.non_calculable_reasons)
 
     def test_incomplete_snapshot_non_calculable(self):
-        """불완전 스냅샷(equity_complete=False): 계산 불가."""
         t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
         self._create_snapshot(t1, Decimal("100000000"), equity_complete=False)
@@ -184,7 +159,6 @@ class TestPerformanceAnalysis:
         assert any("불완전" in r for r in interval.non_calculable_reasons)
 
     def test_negative_equity_non_calculable(self):
-        """총평가액 음수: 계산 불가."""
         t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
         self._create_snapshot(t1, Decimal("-1000000"))
@@ -197,7 +171,6 @@ class TestPerformanceAnalysis:
         assert any("음수" in r for r in interval.non_calculable_reasons)
 
     def test_interval_boundary_exclude_start_include_end(self):
-        """구간 경계: 시작 시각 제외, 종료 시각 포함 (start < cf <= end)."""
         t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
         self._create_snapshot(t1, Decimal("100000000"))
@@ -211,7 +184,6 @@ class TestPerformanceAnalysis:
         assert interval.total_deposits_krw == Decimal("1000000")
 
     def test_same_timestamp_snapshots_skipped(self):
-        """동일 시각 스냅샷: 유효하지 않은 구간 건너뛰기."""
         t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
         self._create_snapshot(t1, Decimal("100000000"))
@@ -222,7 +194,6 @@ class TestPerformanceAnalysis:
         assert len(intervals) == 1
 
     def test_limit_parameter(self):
-        """--limit 파라미터: 지정된 개수만큼만 반환."""
         for i in range(5):
             self._create_snapshot(
                 datetime(2025, 1, i + 1, 10, 0, 0, tzinfo=UTC),
@@ -233,7 +204,6 @@ class TestPerformanceAnalysis:
         assert len(intervals) == 2
 
     def test_db_unchanged_after_analysis(self):
-        """분석 전후 DB 불변: 조회만 수행하고 쓰기 없음."""
         t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
         t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
         self._create_snapshot(t1, Decimal("100000000"))
@@ -255,6 +225,141 @@ class TestPerformanceAnalysis:
         assert len(cfs_after) == len(cfs_before)
         assert snaps_after[0].id == snaps_before[0].id
         assert cfs_after[0].id == cfs_before[0].id
+
+    def test_modified_dietz_no_cashflows(self):
+        t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+        t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
+        self._create_snapshot(t1, Decimal("100000000"))
+        self._create_snapshot(t2, Decimal("101000000"))
+
+        intervals = analyze_portfolio_performance(str(self.db_path))
+        assert len(intervals) == 1
+        interval = intervals[0]
+        assert interval.calculable is True
+        assert interval.weighted_external_flow == Decimal("0")
+        assert interval.period_return_pct == Decimal("1.0000")
+
+    def test_modified_dietz_mid_period_deposit(self):
+        t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+        t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
+        self._create_snapshot(t1, Decimal("100000000"))
+        self._create_snapshot(t2, Decimal("101500000"))
+        self._create_cashflow(
+            datetime(2025, 1, 1, 22, 0, 0, tzinfo=UTC),
+            CashFlowType.DEPOSIT, "KRW", Decimal("1000000")
+        )
+
+        intervals = analyze_portfolio_performance(str(self.db_path))
+        assert len(intervals) == 1
+        interval = intervals[0]
+        assert interval.calculable is True
+        assert interval.weighted_external_flow == Decimal("500000.00")
+        assert interval.period_return_pct == Decimal("0.4975")
+
+    def test_modified_dietz_early_deposit(self):
+        t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+        t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
+        self._create_snapshot(t1, Decimal("100000000"))
+        self._create_snapshot(t2, Decimal("101500000"))
+        self._create_cashflow(
+            datetime(2025, 1, 1, 11, 0, 0, tzinfo=UTC),
+            CashFlowType.DEPOSIT, "KRW", Decimal("1000000")
+        )
+
+        intervals = analyze_portfolio_performance(str(self.db_path))
+        assert len(intervals) == 1
+        interval = intervals[0]
+        assert interval.calculable is True
+        assert interval.weighted_external_flow > Decimal("900000")
+        assert interval.weighted_external_flow < Decimal("1000000")
+
+    def test_modified_dietz_late_deposit(self):
+        t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+        t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
+        self._create_snapshot(t1, Decimal("100000000"))
+        self._create_snapshot(t2, Decimal("101500000"))
+        self._create_cashflow(
+            datetime(2025, 1, 2, 9, 0, 0, tzinfo=UTC),
+            CashFlowType.DEPOSIT, "KRW", Decimal("1000000")
+        )
+
+        intervals = analyze_portfolio_performance(str(self.db_path))
+        assert len(intervals) == 1
+        interval = intervals[0]
+        assert interval.calculable is True
+        assert interval.weighted_external_flow > Decimal("0")
+        assert interval.weighted_external_flow < Decimal("100000")
+
+    def test_modified_dietz_withdrawal(self):
+        t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+        t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
+        self._create_snapshot(t1, Decimal("100000000"))
+        self._create_snapshot(t2, Decimal("99500000"))
+        self._create_cashflow(
+            datetime(2025, 1, 1, 22, 0, 0, tzinfo=UTC),
+            CashFlowType.WITHDRAWAL, "KRW", Decimal("1000000")
+        )
+
+        intervals = analyze_portfolio_performance(str(self.db_path))
+        assert len(intervals) == 1
+        interval = intervals[0]
+        assert interval.calculable is True
+        assert interval.weighted_external_flow == Decimal("-500000.00")
+        assert interval.period_return_pct == Decimal("0.5025")
+
+    def test_modified_dietz_denominator_zero_or_negative(self):
+        """분모 0 이하: 계산 불가.
+
+        시작 평가액이 0이고 초반에 큰 출금이 발생하면
+        시작 평가액 + 가중 외부 현금흐름 <= 0이 되어 계산 불가.
+        """
+        t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+        t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
+        self._create_snapshot(t1, Decimal("0"))
+        self._create_snapshot(t2, Decimal("1000000"))
+        # 초반에 큰 출금 발생 (가중치 높음) -> 분모가 음수
+        self._create_cashflow(
+            datetime(2025, 1, 1, 10, 30, 0, tzinfo=UTC),
+            CashFlowType.WITHDRAWAL, "KRW", Decimal("1000000")
+        )
+
+        intervals = analyze_portfolio_performance(str(self.db_path))
+        assert len(intervals) == 1
+        interval = intervals[0]
+        assert interval.calculable is False
+        assert interval.period_return_pct is None
+        assert any("분모" in r for r in interval.non_calculable_reasons)
+
+    def test_modified_dietz_zero_duration(self):
+        t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+        self._create_snapshot(t1, Decimal("100000000"))
+        self._create_snapshot(t1, Decimal("101000000"))
+
+        intervals = analyze_portfolio_performance(str(self.db_path))
+        assert len(intervals) == 0
+
+    def test_mixed_deposit_withdrawal(self):
+        t1 = datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+        t2 = datetime(2025, 1, 2, 10, 0, 0, tzinfo=UTC)
+        self._create_snapshot(t1, Decimal("100000000"))
+        self._create_snapshot(t2, Decimal("101500000"))
+        self._create_cashflow(
+            datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC),
+            CashFlowType.DEPOSIT, "KRW", Decimal("2000000")
+        )
+        self._create_cashflow(
+            datetime(2025, 1, 1, 14, 0, 0, tzinfo=UTC),
+            CashFlowType.WITHDRAWAL, "KRW", Decimal("500000")
+        )
+
+        intervals = analyze_portfolio_performance(str(self.db_path))
+        assert len(intervals) == 1
+        interval = intervals[0]
+        assert interval.calculable is True
+        assert interval.total_deposits_krw == Decimal("2000000")
+        assert interval.total_withdrawals_krw == Decimal("500000")
+        assert interval.net_external_flow == Decimal("1500000")
+        assert interval.adjusted_change == Decimal("0")
 
 
 class TestFormatPerformanceReport:
@@ -293,7 +398,9 @@ class TestFormatPerformanceReport:
             total_deposits_krw=Decimal("0"),
             total_withdrawals_krw=Decimal("0"),
             net_external_flow=Decimal("0"),
+            weighted_external_flow=Decimal("0"),
             adjusted_change=Decimal("1000000"),
+            period_return_pct=Decimal("0.9901"),
             calculable=True,
             non_calculable_reasons=[],
         )
@@ -331,7 +438,9 @@ class TestFormatPerformanceReport:
             total_deposits_krw=Decimal("0"),
             total_withdrawals_krw=Decimal("0"),
             net_external_flow=Decimal("0"),
+            weighted_external_flow=Decimal("0"),
             adjusted_change=None,
+            period_return_pct=None,
             calculable=False,
             non_calculable_reasons=["시작 스냅샷 불완전: 평가 불완전"],
         )

@@ -1379,7 +1379,7 @@ def portfolio_benchmark(
         "all",
         "--benchmark",
         "-b",
-        help="비교할 벤치마크 (KOSPI200, SP500, all)",
+        help="비교할 벤치마크 (KOSPI200, SPY_ETF, all)",
         case_sensitive=False,
     ),
     provider: str | None = typer.Option(
@@ -1413,12 +1413,12 @@ def portfolio_benchmark(
     # 벤치마크 검증
     bench_list = []
     if benchmark.lower() == "all":
-        bench_list = ["KOSPI200", "SP500"]
-    elif benchmark.upper() in ("KOSPI200", "SP500"):
+        bench_list = ["KOSPI200", "SPY_ETF"]
+    elif benchmark.upper() in ("KOSPI200", "SPY_ETF"):
         bench_list = [benchmark.upper()]
     else:
         console.print(f"[red]지원하지 않는 벤치마크: {benchmark}[/red]")
-        console.print("지원: KOSPI200, SP500, all")
+        console.print("지원: KOSPI200, SPY_ETF, all")
         raise typer.Exit(1)
 
     try:

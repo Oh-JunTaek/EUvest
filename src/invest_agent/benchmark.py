@@ -2,12 +2,18 @@
 
 포트폴리오 성과를 시장 지수(KOSPI 200, S&P 500)와 비교하여
 초과수익률을 계산한다.
+
+주의:
+- KOSPI 200: FinanceDataReader 심볼 'KS200' 사용 (KRX 지수)
+- S&P 500: SPY ETF 가격수익률로 참고 표시 (USD 기준, KRW 초과수익률 계산 불가)
+- OHLCV 데이터는 거래일 자정 UTC로 저장되므로, 실제 종가 확정 시각(시장 마감 시간)을 고려해
+  포트폴리오 평가 경계와 비교 시 미래 데이터 사용 방지 로직 적용
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, time
 from decimal import Decimal
 from itertools import groupby
 from pathlib import Path
@@ -23,9 +29,9 @@ class BenchmarkResult:
     """벤치마크 비교 결과."""
 
     benchmark_name: str
-    benchmark_type: Literal["KOSPI200", "SP500"]
+    benchmark_type: Literal["KOSPI200", "SPY_ETF"]
     benchmark_currency: str  # "KRW" 또는 "USD"
-    index_type: str  # "가격지수" 또는 "총수익지수"
+    index_type: str  # "가격지수" 또는 "총수익지수" 또는 "ETF 가격수익률"
 
     portfolio_start: datetime
     portfolio_end: datetime
@@ -34,7 +40,7 @@ class BenchmarkResult:
 
     benchmark_start_value: Decimal | None
     benchmark_end_value: Decimal | None
-    benchmark_start_date: str | None  # 실제 사용된 가격 날짜
+    benchmark_start_date: str | None  # 실제 사용된 가격 날짜 (거래일)
     benchmark_end_date: str | None
     benchmark_return_pct: Decimal | None
     benchmark_calculable: bool
@@ -46,9 +52,34 @@ class BenchmarkResult:
     data_source: str
 
 
+# 벤치마크 심볼 정의
+# KOSPI 200: FinanceDataReader 심볼 'KS200' (KRX 지수)
+# SPY ETF: FinanceDataReader 심볼 'SPY' (S&P 500 추종 ETF, USD 기준)
 BENCHMARK_SYMBOLS = {
-    "KOSPI200": {"asset_id": "KRX:252670", "market": Market.KRX, "currency": "KRW", "index_type": "가격지수", "source": "FinanceDataReader (KRX)"},
-    "SP500": {"asset_id": "US:SPY", "market": Market.US, "currency": "USD", "index_type": "가격지수 (ETF SPY 기준)", "source": "FinanceDataReader (Yahoo Finance)"},
+    "KOSPI200": {
+        "asset_id": "KRX:KS200",
+        "market": Market.KRX,
+        "currency": "KRW",
+        "index_type": "가격지수",
+        "source": "FinanceDataReader (KRX:KS200)",
+        "is_index": True,
+    },
+    "SPY_ETF": {
+        "asset_id": "US:SPY",
+        "market": Market.US,
+        "currency": "USD",
+        "index_type": "ETF 가격수익률 (SPY)",
+        "source": "FinanceDataReader (Yahoo Finance: SPY)",
+        "is_index": False,
+    },
+}
+
+# 시장별 종가 확정 시간 (현지 시간 기준)
+# KRX: 15:30 KST = 06:30 UTC
+# US: 16:00 EST/EDT = 21:00 UTC (EST) 또는 20:00 UTC (EDT)
+MARKET_CLOSE_UTC = {
+    Market.KRX: time(6, 30),   # KST 15:30 = UTC 06:30
+    Market.US: time(21, 0),    # EST 16:00 = UTC 21:00 (하절기 EDT 20:00 별도 처리 필요)
 }
 
 
@@ -81,6 +112,43 @@ def _validate_ohlcv(ohlcv: OHLCV | None, label: str, reasons: list[str]) -> bool
         return False
     return True
 
+def _get_market_close_utc(market: Market, trade_date: str) -> datetime:
+    """거래일의 시장 마감 시각을 UTC datetime으로 반환."""
+    base_date = datetime.fromisoformat(trade_date).date()
+    close_time = MARKET_CLOSE_UTC.get(market, time(0, 0))
+    # naive datetime을 UTC로 간주
+    return datetime.combine(base_date, close_time).replace(tzinfo=UTC)
+
+
+def _check_price_confirmation_time(
+    ohlcv: OHLCV,
+    portfolio_boundary: datetime,
+    boundary_label: str,
+    reasons: list[str],
+) -> bool:
+    """종가 확정 시각이 포트폴리오 평가 경계보다 미래가 아닌지 검증.
+
+    OHLCV timestamp는 거래일 자정 UTC로 저장됨.
+    실제 종가는 시장 마감 시간에 확정되므로, 포트폴리오 평가 시각이
+    시장 마감 시각보다 이르면 해당 거래일 종가는 아직 확정되지 않은 것임.
+    """
+    if ohlcv is None:
+        return False
+
+    market_close_utc = _get_market_close_utc(ohlcv.market, ohlcv.timestamp.date().isoformat())
+
+    # 포트폴리오 평가 시각이 시장 마감 시각보다 이르면
+    # 해당 거래일의 종가는 아직 확정되지 않은 상태 (미래 데이터)
+    if portfolio_boundary < market_close_utc:
+        reasons.append(
+            f"{boundary_label}: 종가 확정 시각({market_close_utc.isoformat()}) 이후 평가 필요 "
+            f"(포트폴리오 경계: {portfolio_boundary.isoformat()})"
+        )
+        return False
+
+    return True
+
+
 def calculate_benchmark_return(
     repo: OHLCVRepository,
     benchmark_name: str,
@@ -88,39 +156,80 @@ def calculate_benchmark_return(
     portfolio_end: datetime,
     provider: str | None = None,
     max_freshness_days: int = 5,
+    max_days_back: int = 5,
 ) -> tuple[Decimal | None, Decimal | None, str | None, str | None, bool, list[str]]:
+    """벤치마크 수익률 계산.
+
+    Args:
+        repo: OHLCV 리포지토리
+        benchmark_name: "KOSPI200" 또는 "SPY_ETF"
+        portfolio_start: 포트폴리오 구간 시작 시각
+        portfolio_end: 포트폴리오 구간 종료 시각
+        provider: 데이터 공급자 (None이면 첫 번째 사용 가능 공급자)
+        max_freshness_days: 데이터 신선도 허용 일수
+        max_days_back: 검색 최대 과거 일수 (기본값: 5)
+
+    Returns:
+        (시작값, 종료값, 시작일, 종료일, 계산가능여부, 불가사유리스트)
+    """
     if benchmark_name not in BENCHMARK_SYMBOLS:
-        return None, None, None, None, False, [f'알 수 없는 벤치마크: {benchmark_name}']
+        return None, None, None, None, False, [f"알 수 없는 벤치마크: {benchmark_name}"]
+
     info = BENCHMARK_SYMBOLS[benchmark_name]
-    asset_id = info['asset_id']
+    asset_id = info["asset_id"]
+
+    # 공급자 결정
     if provider is None:
         providers = repo.get_providers(asset_id)
         if not providers:
-            return None, None, None, None, False, [f'{benchmark_name}: 저장된 공급자 없음']
+            return None, None, None, None, False, [f"{benchmark_name}: 저장된 공급자 없음"]
         provider = providers[0]
+
     reasons = []
-    start_ohlcv, start_date = _get_closest_ohlcv(repo, asset_id, portfolio_start, provider, max_freshness_days)
-    end_ohlcv, end_date = _get_closest_ohlcv(repo, asset_id, portfolio_end, provider, max_freshness_days)
-    if not _validate_ohlcv(start_ohlcv, '시작 기준값', reasons):
+
+    # 시작/종료 기준값 조회
+    start_ohlcv, start_date = _get_closest_ohlcv(repo, asset_id, portfolio_start, provider, max_days_back)
+    end_ohlcv, end_date = _get_closest_ohlcv(repo, asset_id, portfolio_end, provider, max_days_back)
+
+    if not _validate_ohlcv(start_ohlcv, "시작 기준값", reasons):
         return None, None, None, None, False, reasons
-    if not _validate_ohlcv(end_ohlcv, '종료 기준값', reasons):
+    if not _validate_ohlcv(end_ohlcv, "종료 기준값", reasons):
         return None, None, None, None, False, reasons
+
+    # 종가 확정 시각 검증 (미래 데이터 사용 방지)
+    if not _check_price_confirmation_time(start_ohlcv, portfolio_start, "시작 기준값", reasons):
+        return None, None, None, None, False, reasons
+    if not _check_price_confirmation_time(end_ohlcv, portfolio_end, "종료 기준값", reasons):
+        return None, None, None, None, False, reasons
+
+    # 신선도 검증
     if start_date:
         start_dt = datetime.fromisoformat(start_date).replace(tzinfo=UTC)
         if portfolio_start - start_dt > timedelta(days=max_freshness_days):
-            reasons.append(f'시작 기준값 데이터가 너무 오래됨 ({(portfolio_start - start_dt).days}일 경과, 허용: {max_freshness_days}일)')
+            reasons.append(f"시작 기준값 데이터가 너무 오래됨 ({(portfolio_start - start_dt).days}일 경과, 허용: {max_freshness_days}일)")
             return None, None, None, None, False, reasons
+
     if end_date:
         end_dt = datetime.fromisoformat(end_date).replace(tzinfo=UTC)
         if portfolio_end - end_dt > timedelta(days=max_freshness_days):
-            reasons.append(f'종료 기준값 데이터가 너무 오래됨 ({(portfolio_end - end_dt).days}일 경과, 허용: {max_freshness_days}일)')
+            reasons.append(f"종료 기준값 데이터가 너무 오래됨 ({(portfolio_end - end_dt).days}일 경과, 허용: {max_freshness_days}일)")
             return None, None, None, None, False, reasons
+
+    # 동일 거래일 시작/종료 기준값 비교 차단
+    if start_date and end_date and start_date == end_date:
+        reasons.append("시작·종료 기준값이 동일 거래일 (수익률 계산 불가)")
+        return None, None, None, None, False, reasons
+
+    # 수익률 계산: (종료/시작 - 1) * 100
     start_value = start_ohlcv.close
     end_value = end_ohlcv.close
+
     if start_value <= 0:
-        reasons.append('시작 기준값이 0 이하')
+        reasons.append("시작 기준값이 0 이하")
         return None, None, None, None, False, reasons
-    ((end_value / start_value - Decimal('1')) * Decimal('100')).quantize(Decimal('0.0001'))
+
+    benchmark_return = ((end_value / start_value - Decimal("1")) * Decimal("100")).quantize(Decimal("0.0001"))
+
     return start_value, end_value, start_date, end_date, True, []
 
 def compare_with_benchmarks(
@@ -133,7 +242,7 @@ def compare_with_benchmarks(
     if not Path(db_path).exists():
         raise FileNotFoundError(f'DB 파일이 없습니다: {db_path}')
     if benchmarks is None:
-        benchmarks = ['KOSPI200', 'SP500']
+        benchmarks = ['KOSPI200', 'SPY_ETF']
     portfolio_intervals = analyze_portfolio_performance(db_path, limit)
     if not portfolio_intervals:
         return []
@@ -157,8 +266,8 @@ def compare_with_benchmarks(
                     bench_return = ((bench_end_val / bench_start_val - Decimal('1')) * Decimal('100')).quantize(Decimal('0.0001'))
                     excess_return = (portfolio_return - bench_return).quantize(Decimal('0.0001'))
                     excess_calculable = True
-                elif bench_name == 'SP500':
-                    excess_reasons.append('SP500은 USD 기준이므로 KRW 포트폴리오와 직접 비교 불가 (환율 근거 필요)')
+                elif bench_name == 'SPY_ETF':
+                    excess_reasons.append('SPY ETF는 USD 기준이므로 KRW 포트폴리오와 직접 비교 불가 (환율 근거 필요)')
                 else:
                     excess_reasons.append('알 수 없는 벤치마크')
             else:
@@ -216,7 +325,7 @@ def format_benchmark_report(results: list[BenchmarkResult]) -> str:
         else:
             print_line('  EUvest Modified Dietz 수익률: [yellow]계산 불가[/yellow]')
             for reason in portfolio_result.non_calculable_reasons:
-                if not any(r in reason for r in ['벤치마크', 'SP500', 'USD', '환율']):
+                if not any(r in reason for r in ['벤치마크', 'SPY_ETF', 'USD', '환율']):
                     print_line(f'    - {reason}')
         print_line('')
         for result in interval_results:
@@ -236,9 +345,9 @@ def format_benchmark_report(results: list[BenchmarkResult]) -> str:
                 color = 'green' if result.excess_return_pct >= 0 else 'red'
                 print_line(f'    [{color}]초과수익률: {result.excess_return_pct:+.4f}%p[/{color}]')
                 print_line('    [dim]비교 기준: Modified Dietz (시간가중) vs 벤치마크 단순 보유 수익률[/dim]')
-            elif result.benchmark_name == 'SP500':
+            elif result.benchmark_name == 'SPY_ETF':
                 print_line('    [yellow]초과수익률: 비교 불가 (통화 불일치: 포트폴리오 KRW vs 벤치마크 USD)[/yellow]')
-                print_line(f'    [dim]참고: USD 기준 SP500 수익률 {result.benchmark_return_pct}% (환율 적용 시 KRW 환산 가능)[/dim]')
+                print_line(f'    [dim]참고: USD 기준 SPY ETF 가격수익률 {result.benchmark_return_pct}% (환율 적용 시 KRW 환산 가능)[/dim]')
             else:
                 print_line('    [yellow]초과수익률: 비교 불가[/yellow]')
                 for reason in result.non_calculable_reasons:

@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, time
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from itertools import groupby
 from pathlib import Path
@@ -228,7 +228,7 @@ def calculate_benchmark_return(
         reasons.append("시작 기준값이 0 이하")
         return None, None, None, None, False, reasons
 
-    benchmark_return = ((end_value / start_value - Decimal("1")) * Decimal("100")).quantize(Decimal("0.0001"))
+    ((end_value / start_value - Decimal("1")) * Decimal("100")).quantize(Decimal("0.0001"))
 
     return start_value, end_value, start_date, end_date, True, []
 

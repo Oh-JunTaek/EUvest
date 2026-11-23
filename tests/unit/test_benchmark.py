@@ -10,15 +10,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from invest_agent.benchmark import (
-    BenchmarkResult,
     BENCHMARK_SYMBOLS,
+    BenchmarkResult,
     calculate_benchmark_return,
     compare_with_benchmarks,
     format_benchmark_report,
 )
 from invest_agent.domain.models import PortfolioSnapshot
-from invest_agent.market.market_data import Market, OHLCV
-from invest_agent.performance import PerformanceInterval, analyze_portfolio_performance
+from invest_agent.market.market_data import OHLCV, Market
 from invest_agent.storage.repositories import (
     CashFlowRepository,
     OHLCVRepository,
@@ -373,6 +372,7 @@ class TestBenchmarkCLI:
 
     def _run_cli(self, args):
         from typer.testing import CliRunner
+
         from invest_agent.cli import app
         runner = CliRunner()
         return runner.invoke(app, args)

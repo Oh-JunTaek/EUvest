@@ -172,6 +172,76 @@ class TestCalculateBenchmarkReturn:
         )
         assert calc is False
         assert any('종가 확정 시각' in r for r in reasons)
+
+    def test_us_market_dst_handling(self):
+        """미국 서머타임 처리 검증."""
+        # 겨울(EST): 16:00 EST = 21:00 UTC
+        self._save_ohlcv('US:SPY', '2025-01-02', Decimal('480.00'))
+        self._save_ohlcv('US:SPY', '2025-01-03', Decimal('484.80'))
+        portfolio_start = datetime(2025, 1, 2, 22, 0, 0, tzinfo=UTC)  # 22:00 UTC = 16:00 EST (after close)
+        portfolio_end = datetime(2025, 1, 3, 22, 0, 0, tzinfo=UTC)
+        start_val, end_val, start_date, end_date, calc, reasons = calculate_benchmark_return(
+            self.repo, 'SPY_ETF', portfolio_start, portfolio_end
+        )
+        assert calc is True
+        assert start_date == '2025-01-02'
+        assert end_date == '2025-01-03'
+
+        # 여름(EDT): 16:00 EDT = 20:00 UTC
+        self._save_ohlcv('US:SPY', '2025-07-01', Decimal('500.00'))
+        self._save_ohlcv('US:SPY', '2025-07-02', Decimal('505.00'))
+        portfolio_start = datetime(2025, 7, 1, 21, 0, 0, tzinfo=UTC)  # 21:00 UTC = 16:00 EDT (after close)
+        portfolio_end = datetime(2025, 7, 2, 21, 0, 0, tzinfo=UTC)
+        start_val, end_val, start_date, end_date, calc, reasons = calculate_benchmark_return(
+            self.repo, 'SPY_ETF', portfolio_start, portfolio_end
+        )
+        assert calc is True
+        assert start_date == '2025-07-01'
+        assert end_date == '2025-07-02'
+
+        # DST 시작일 (3월 둘째 일요일): 3/9 07:00 UTC 이후에 EDT 적용
+        self._save_ohlcv('US:SPY', '2025-03-09', Decimal('500.00'))
+        self._save_ohlcv('US:SPY', '2025-03-10', Decimal('505.00'))
+        # 3/9 06:00 UTC (DST 시작 전) - 여전히 EST
+        portfolio_start = datetime(2025, 3, 9, 6, 0, 0, tzinfo=UTC)
+        portfolio_end = datetime(2025, 3, 10, 21, 0, 0, tzinfo=UTC)
+        start_val, end_val, start_date, end_date, calc, reasons = calculate_benchmark_return(
+            self.repo, 'SPY_ETF', portfolio_start, portfolio_end
+        )
+        # 3/9 06:00 UTC는 DST 시작 전(07:00 UTC) -> EST 적용, 마감 21:00 UTC
+        # portfolio_start 06:00 < 21:00 (마감) -> 종가 확정 안됨 -> 계산 불가
+        assert calc is False
+        assert any('종가 확정 시각' in r for r in reasons)
+
+        # 3/9 21:00 UTC (DST 시작 후, 마감 20:00 UTC 이후) -> 계산 가능
+        portfolio_start = datetime(2025, 3, 9, 21, 0, 0, tzinfo=UTC)
+        start_val, end_val, start_date, end_date, calc, reasons = calculate_benchmark_return(
+            self.repo, 'SPY_ETF', portfolio_start, portfolio_end
+        )
+        assert calc is True
+        assert start_date == '2025-03-09'
+        assert end_date == '2025-03-10'
+
+        # DST 종료일 (11월 첫째 일요일): 11/2 06:00 UTC 이후 EST
+        self._save_ohlcv('US:SPY', '2025-11-02', Decimal('480.00'))
+        self._save_ohlcv('US:SPY', '2025-11-03', Decimal('484.80'))
+        # 11/2 05:00 UTC (DST 종료 전) - 여전히 EDT, 마감 20:00 UTC
+        portfolio_start = datetime(2025, 11, 2, 5, 0, 0, tzinfo=UTC)
+        portfolio_end = datetime(2025, 11, 3, 21, 0, 0, tzinfo=UTC)
+        start_val, end_val, start_date, end_date, calc, reasons = calculate_benchmark_return(
+            self.repo, 'SPY_ETF', portfolio_start, portfolio_end
+        )
+        assert calc is False
+        assert any('종가 확정 시각' in r for r in reasons)
+
+        # 11/2 22:00 UTC (DST 종료 후, 마감 21:00 UTC 이후) -> 계산 가능
+        portfolio_start = datetime(2025, 11, 2, 22, 0, 0, tzinfo=UTC)
+        start_val, end_val, start_date, end_date, calc, reasons = calculate_benchmark_return(
+            self.repo, 'SPY_ETF', portfolio_start, portfolio_end
+        )
+        assert calc is True
+        assert start_date == '2025-11-02'
+        assert end_date == '2025-11-03'
 class TestCompareWithBenchmarks:
     def setup_method(self):
         self.temp_dir = tempfile.mkdtemp()

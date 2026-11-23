@@ -75,11 +75,12 @@ BENCHMARK_SYMBOLS = {
 }
 
 # 시장별 종가 확정 시간 (현지 시간 기준)
-# KRX: 15:30 KST = 06:30 UTC
-# US: 16:00 EST/EDT = 21:00 UTC (EST) 또는 20:00 UTC (EDT)
+# KRX: 15:30 KST = 06:30 UTC (연중 고정)
+# US: 16:00 EST/EDT = 21:00 UTC (EST, 겨울) 또는 20:00 UTC (EDT, 여름)
+# 미국 서머타임: 3월 둘째 일요일 ~ 11월 첫째 일요일
 MARKET_CLOSE_UTC = {
-    Market.KRX: time(6, 30),   # KST 15:30 = UTC 06:30
-    Market.US: time(21, 0),    # EST 16:00 = UTC 21:00 (하절기 EDT 20:00 별도 처리 필요)
+    Market.KRX: time(6, 30),   # KST 15:30 = UTC 06:30 (연중 고정)
+    Market.US: time(21, 0),    # EST 16:00 = UTC 21:00 (겨울, 기본값)
 }
 
 
@@ -112,10 +113,50 @@ def _validate_ohlcv(ohlcv: OHLCV | None, label: str, reasons: list[str]) -> bool
         return False
     return True
 
+def _is_us_dst(date: datetime) -> bool:
+    """미국 서머타임(EDT) 기간 여부 확인.
+
+    미국 서머타임: 3월 둘째 일요일 02:00 ~ 11월 첫째 일요일 02:00 (현지 시간)
+    UTC 기준으로는 3월 둘째 일요일 07:00 ~ 11월 첫째 일요일 06:00 UTC
+    """
+    if date.tzinfo is not None:
+        date = date.astimezone(UTC).replace(tzinfo=None)
+    year = date.year
+
+    # 3월 둘째 일요일 계산 (3월 8일 ~ 14일 사이의 일요일)
+    march_start = datetime(year, 3, 8)
+    days_until_sunday = (6 - march_start.weekday()) % 7
+    dst_start = march_start + timedelta(days=days_until_sunday)
+    # DST 시작: 3월 둘째 일요일 02:00 현지 = 07:00 UTC
+    dst_start = datetime.combine(dst_start, time(7, 0))
+
+    # 11월 첫째 일요일 계산 (11월 1일 ~ 7일 사이의 일요일)
+    nov_start = datetime(year, 11, 1)
+    days_until_sunday = (6 - nov_start.weekday()) % 7
+    dst_end_date = nov_start + timedelta(days=days_until_sunday)
+    # DST 종료: 11월 첫째 일요일 02:00 현지 = 06:00 UTC (EDT=UTC-4)
+    dst_end = datetime.combine(dst_end_date, time(6, 0))
+
+    # UTC 기준으로 비교
+    return dst_start <= date < dst_end
+
+
 def _get_market_close_utc(market: Market, trade_date: str) -> datetime:
-    """거래일의 시장 마감 시각을 UTC datetime으로 반환."""
+    """거래일의 시장 마감 시각을 UTC datetime으로 반환.
+
+    미국 서머타임(EDT) 기간에는 20:00 UTC, 그 외(EST)에는 21:00 UTC.
+    """
     base_date = datetime.fromisoformat(trade_date).date()
-    close_time = MARKET_CLOSE_UTC.get(market, time(0, 0))
+    if market == Market.US:
+        # 거래일 기준으로 DST 여부 판단
+        # 거래일 00:00 UTC 기준으로 DST 여부 판단 (충분히 보수적)
+        check_dt = datetime.combine(base_date, time(0, 0), tzinfo=UTC)
+        if _is_us_dst(check_dt):
+            close_time = time(20, 0)  # EDT: 16:00 EDT = 20:00 UTC
+        else:
+            close_time = time(21, 0)  # EST: 16:00 EST = 21:00 UTC
+    else:
+        close_time = MARKET_CLOSE_UTC.get(market, time(0, 0))
     # naive datetime을 UTC로 간주
     return datetime.combine(base_date, close_time).replace(tzinfo=UTC)
 

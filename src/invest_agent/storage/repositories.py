@@ -278,6 +278,14 @@ class DecisionRepository:
             ).fetchall()
             return [self._row_to_decision(row) for row in rows]
 
+    def get_latest(self, limit: int = 50) -> list[Decision]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM decisions ORDER BY decided_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._row_to_decision(row) for row in rows]
+
     def get_by_asset(self, asset_id: str, limit: int = 50) -> list[Decision]:
         """자산 ID로 의사결정 조회 (thesis join 필요)."""
         with self._conn() as conn:

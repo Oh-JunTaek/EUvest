@@ -76,6 +76,12 @@ def decisions_evaluate(
     horizon: Annotated[
         int | None, typer.Option("--horizon", help="표시할 평가 기간 (1, 5, 20 중 하나, 기본값: 전체)")
     ] = None,
+    as_of: Annotated[
+        str | None, typer.Option("--as-of", help="평가 기준 시점 (ISO 8601, 기본값: 현재 UTC)")
+    ] = None,
+    provider: Annotated[
+        str | None, typer.Option("--provider", "-p", help="OHLCV 공급자 지정 (기본값: 자동)")
+    ] = None,
 ) -> None:
     """AI 의사결정 사후 평가 (방향 적중률, 가격 변화율).
 
@@ -95,12 +101,18 @@ def decisions_evaluate(
     try:
         from invest_agent.evaluation import evaluate_decisions
 
+        as_of_dt = None
+        if as_of:
+            as_of_dt = datetime.fromisoformat(as_of.replace('Z', '+00:00'))
+
         evaluations, summaries = evaluate_decisions(
             db_path=db_path,
             limit=limit,
             asset=asset,
             model=model,
             horizon=horizon,
+            as_of=as_of_dt,
+            provider=provider,
         )
     except FileNotFoundError as e:
         console.print(f"[red]{e}[/red]")
@@ -122,6 +134,10 @@ def decisions_evaluate(
         console.print(f"모델 필터: {model}")
     if horizon:
         console.print(f"표시 기간: {horizon}거래일")
+    if as_of:
+        console.print(f"평가 기준: {as_of}")
+    if provider:
+        console.print(f"공급자 필터: {provider}")
     console.print()
 
     # 개별 평가 결과 출력

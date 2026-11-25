@@ -118,7 +118,6 @@ def _is_us_dst(date: datetime) -> bool:
     dst_end = datetime.combine(dst_end_date, time(6, 0))
     return dst_start <= date < dst_end
 
-
 def _get_market_close_utc(market: str, trade_date: str) -> datetime:
     base_date = datetime.fromisoformat(trade_date).date()
     if market == "US":
@@ -131,7 +130,6 @@ def _get_market_close_utc(market: str, trade_date: str) -> datetime:
         close_time = MARKET_CLOSE_UTC.get(market, time(0, 0))
     return datetime.combine(base_date, close_time).replace(tzinfo=UTC)
 
-
 def _get_closest_ohlcv(
     repo: OHLCVRepository,
     asset_id: str,
@@ -141,14 +139,13 @@ def _get_closest_ohlcv(
 ) -> tuple[OHLCV | None, str | None]:
     target_date = target_dt.date().isoformat()
     search_start = (target_dt - timedelta(days=max_days_back)).date().isoformat()
-    ohlcv_list = repo.get_range(asset_id, search_start, target_date)
+    ohlcv_list = repo.get_range(asset_id, search_start, target_date, provider=provider)
     if not ohlcv_list:
         return None, None
     for ohlcv in ohlcv_list:
         if ohlcv.timestamp.date() <= target_dt.date():
             return ohlcv, ohlcv.timestamp.date().isoformat()
     return None, None
-
 
 def _get_trading_day_offset(
     repo: OHLCVRepository,
@@ -158,7 +155,7 @@ def _get_trading_day_offset(
     provider: str | None = None,
 ) -> tuple[str | None, Decimal | None]:
     end_search = (datetime.fromisoformat(start_date).date() + timedelta(days=50)).isoformat()
-    ohlcv_list = repo.get_range(asset_id, start_date, end_search)
+    ohlcv_list = repo.get_range(asset_id, start_date, end_search, provider=provider)
     if not ohlcv_list:
         return None, None
     valid_days = [
@@ -171,23 +168,23 @@ def _get_trading_day_offset(
     target = valid_days[offset_days - 1]
     return target.timestamp.date().isoformat(), target.close
 
-
 def _check_price_confirmation_time(
     ohlcv: OHLCV | None,
-    portfolio_boundary: datetime,
+    as_of: datetime,
     boundary_label: str,
     reasons: list[str],
 ) -> bool:
     if ohlcv is None:
         return False
     market_close_utc = _get_market_close_utc(ohlcv.market, ohlcv.timestamp.date().isoformat())
-    if portfolio_boundary < market_close_utc:
+    if as_of < market_close_utc:
         reasons.append(
             f"{boundary_label}: 종가 확정 시각({market_close_utc.isoformat()}) 이후 평가 필요 "
-            f"(평가 경계: {portfolio_boundary.isoformat()})"
+            f"(평가 기준: {as_of.isoformat()})"
         )
         return False
     return True
+
 def evaluate_decision(
     decision: Decision,
     thesis_repo: ThesisRepository,
@@ -195,8 +192,21 @@ def evaluate_decision(
     horizons: tuple[int, ...] = EVALUATION_HORIZONS,
     max_freshness_days: int = 10,
     max_days_back: int = 10,
+    as_of: datetime | None = None,
+    provider: str | None = None,
 ) -> DecisionEvaluation:
-    """단일 의사결정 평가."""
+    """단일 의사결정 평가.
+
+    Args:
+        decision: 평가할 의사결정
+        thesis_repo: 가설 리포지토리
+        ohlcv_repo: OHLCV 리포지토리
+        horizons: 평가 기간 (거래일 단위)
+        max_freshness_days: 데이터 최대 경과 일수
+        max_days_back: 과거 데이터 검색 범위
+        as_of: 평가 기준 시점 (기본값: 현재 UTC). 이 시점 이후 확정되는 가격은 사용하지 않음.
+        provider: OHLCV 공급자 지정. 지정 시 해당 공급자 데이터만 사용.
+    """
     thesis = thesis_repo.get(decision.thesis_id)
     if not thesis:
         return DecisionEvaluation(
@@ -230,15 +240,19 @@ def evaluate_decision(
     asset_id = thesis.asset_id
     decided_at = decision.decided_at
 
+    # as_of가 없으면 현재 UTC 사용
+    if as_of is None:
+        as_of = datetime.now(UTC)
+
     base_ohlcv, base_price_date = _get_closest_ohlcv(
-        ohlcv_repo, asset_id, decided_at, max_days_back=10
+        ohlcv_repo, asset_id, decided_at, provider=provider, max_days_back=10
     )
 
     base_price = None
     base_price_provider = None
     if base_ohlcv:
         base_price = base_ohlcv.close
-        base_price_provider = "OHLCV"
+        base_price_provider = base_ohlcv.provider if hasattr(base_ohlcv, "provider") else "OHLCV"
 
     if base_price is None or base_price <= 0:
         return DecisionEvaluation(
@@ -272,7 +286,7 @@ def evaluate_decision(
     results = {}
     for horizon in horizons:
         price_date, price = _get_trading_day_offset(
-            ohlcv_repo, asset_id, base_price_date or "", horizon
+            ohlcv_repo, asset_id, base_price_date or "", horizon, provider=provider
         )
 
         horizon_price = None
@@ -283,11 +297,13 @@ def evaluate_decision(
         if price is None or price_date is None:
             horizon_reason = f"{horizon}거래일 후 가격 데이터 없음"
         else:
+            # 평가 대상 종가의 확정 시각 검증 - as_of 기준으로 확인
             eval_ohlcv, _ = _get_closest_ohlcv(
-                ohlcv_repo, asset_id, datetime.fromisoformat(price_date + "T00:00:00").replace(tzinfo=UTC)
+                ohlcv_repo, asset_id, datetime.fromisoformat(price_date + "T00:00:00").replace(tzinfo=UTC),
+                provider=provider
             )
-            if not _check_price_confirmation_time(eval_ohlcv, decision.decided_at + timedelta(days=horizon * 7), f"{horizon}일 후 평가", []):
-                horizon_reason = f"{horizon}일 후 평가: 종가 확정 시각 이후 평가 필요"
+            if not _check_price_confirmation_time(eval_ohlcv, as_of, f"{horizon}일 후 평가", []):
+                horizon_reason = f"{horizon}일 후 평가: 종가 확정 시각 이후 평가 필요 (as_of={as_of.isoformat()})"
             else:
                 horizon_price = price
                 return_pct = ((price / base_price - Decimal("1")) * Decimal("100")).quantize(Decimal("0.0001"))
@@ -295,8 +311,12 @@ def evaluate_decision(
 
                 if decision.outcome == DecisionOutcome.TRADE and decision.side == OrderSide.BUY:
                     horizon_hit = return_pct > Decimal("0")
+                    if return_pct == Decimal("0"):
+                        horizon_hit = None
                 elif decision.outcome == DecisionOutcome.TRADE and decision.side == OrderSide.SELL:
                     horizon_hit = return_pct < Decimal("0")
+                    if return_pct == Decimal("0"):
+                        horizon_hit = None
                 else:
                     horizon_hit = None
 
@@ -338,14 +358,27 @@ def evaluate_decision(
         evaluable=evaluable,
         non_evaluable_reasons=non_evaluable_reasons,
     )
+
 def evaluate_decisions(
     db_path: str,
     limit: int = 50,
     asset: str | None = None,
     model: str | None = None,
     horizon: int | None = None,
+    as_of: datetime | None = None,
+    provider: str | None = None,
 ) -> tuple[list[DecisionEvaluation], list[ModelEvaluationSummary]]:
-    """최근 N개 의사결정 평가."""
+    """최근 N개 의사결정 평가.
+
+    Args:
+        db_path: SQLite DB 경로
+        limit: 조회할 의사결정 개수
+        asset: 특정 종목만 평가 (예: KRX:005930)
+        model: 특정 모델만 평가
+        horizon: 표시할 평가 기간 (1, 5, 20 중 하나)
+        as_of: 평가 기준 시점 (기본값: 현재 UTC)
+        provider: OHLCV 공급자 지정
+    """
     if not Path(db_path).exists():
         raise FileNotFoundError(f"DB 파일이 없습니다: {db_path}")
 
@@ -369,7 +402,13 @@ def evaluate_decisions(
 
     evaluations = []
     for decision in decisions:
-        eval_result = evaluate_decision(decision, thesis_repo, ohlcv_repo)
+        eval_result = evaluate_decision(
+            decision,
+            thesis_repo,
+            ohlcv_repo,
+            as_of=as_of,
+            provider=provider,
+        )
         evaluations.append(eval_result)
 
     model_summaries = _compute_model_summaries(evaluations)

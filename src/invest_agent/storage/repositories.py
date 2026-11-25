@@ -213,6 +213,13 @@ class DecisionRepository:
 
     def save(self, decision: Decision) -> None:
         with self._conn() as conn:
+            # Verify thesis exists before inserting decision (defensive check)
+            thesis_exists = conn.execute(
+                "SELECT 1 FROM theses WHERE id = ?", (str(decision.thesis_id),)
+            ).fetchone()
+            if not thesis_exists:
+                raise ValueError(f"Thesis with id {decision.thesis_id} does not exist")
+
             conn.execute(
                 """
                 INSERT INTO decisions

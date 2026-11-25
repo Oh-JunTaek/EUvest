@@ -8,18 +8,42 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from pathlib import Path
 from uuid import UUID
 
 from invest_agent.domain.models import Decision, DecisionOutcome, OrderSide
-from invest_agent.market.market_data import OHLCV
+from invest_agent.market.calendar import get_calendar
+from invest_agent.market.market_data import OHLCV, Market
 from invest_agent.storage.repositories import (
     DecisionRepository,
     OHLCVRepository,
     ThesisRepository,
 )
+
+
+class EvaluationStatus(StrEnum):
+    """평가 상태."""
+    COMPLETED = "COMPLETED"       # 정상 평가 완료
+    PENDING = "PENDING"           # 필요 데이터가 미래에 확정됨
+    UNAVAILABLE = "UNAVAILABLE"   # 필요 데이터 없음
+    INVALID = "INVALID"           # 잘못된 데이터 (가격 0 이하 등)
+    EXCLUDED = "EXCLUDED"         # 방향 적중률 비대상 (NO_TRADE, BLOCKED, ERROR)
+
+
+@dataclass(slots=True, frozen=True)
+class HorizonEvaluation:
+    """단일 평가 기간(1D/5D/20D) 결과."""
+
+    horizon_days: int
+    price: Decimal | None
+    price_date: str | None
+    return_pct: Decimal | None
+    hit: bool | None  # True=적중, False=미적중, None=중립/제외/대기
+    status: EvaluationStatus
+    reason: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -39,22 +63,13 @@ class DecisionEvaluation:
     base_price_date: str | None
     base_price_provider: str | None
 
-    horizon_1d_price: Decimal | None
-    horizon_1d_return_pct: Decimal | None
-    horizon_1d_hit: bool | None
-    horizon_1d_reason: str | None
+    horizon_1d: HorizonEvaluation
+    horizon_5d: HorizonEvaluation
+    horizon_20d: HorizonEvaluation
 
-    horizon_5d_price: Decimal | None
-    horizon_5d_return_pct: Decimal | None
-    horizon_5d_hit: bool | None
-    horizon_5d_reason: str | None
-
-    horizon_20d_price: Decimal | None
-    horizon_20d_return_pct: Decimal | None
-    horizon_20d_hit: bool | None
-    horizon_20d_reason: str | None
-
+    # 전체 평가 가능 여부 (모든 기간이 COMPLETED인 경우)
     evaluable: bool
+    # 각 기간별 평가 불가 사유
     non_evaluable_reasons: list[str]
 
 
@@ -104,10 +119,13 @@ MARKET_CLOSE_UTC = {
     "KRX": time(6, 30),
     "US": time(21, 0),
 }
-def _is_us_dst(date: datetime) -> bool:
-    if date.tzinfo is not None:
-        date = date.astimezone(UTC).replace(tzinfo=None)
-    year = date.year
+
+
+def _is_us_dst(dt: datetime) -> bool:
+    """미국 DST(서머타임) 적용 여부 판단."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC).replace(tzinfo=None)
+    year = dt.year
     march_start = datetime(year, 3, 8)
     days_until_sunday = (6 - march_start.weekday()) % 7
     dst_start = march_start + timedelta(days=days_until_sunday)
@@ -116,9 +134,11 @@ def _is_us_dst(date: datetime) -> bool:
     days_until_sunday = (6 - nov_start.weekday()) % 7
     dst_end_date = nov_start + timedelta(days=days_until_sunday)
     dst_end = datetime.combine(dst_end_date, time(6, 0))
-    return dst_start <= date < dst_end
+    return dst_start <= dt < dst_end
+
 
 def _get_market_close_utc(market: str, trade_date: str) -> datetime:
+    """시장별 종가 확정 시각(UTC) 계산."""
     base_date = datetime.fromisoformat(trade_date).date()
     if market == "US":
         check_dt = datetime.combine(base_date, time(0, 0), tzinfo=UTC)
@@ -130,6 +150,158 @@ def _get_market_close_utc(market: str, trade_date: str) -> datetime:
         close_time = MARKET_CLOSE_UTC.get(market, time(0, 0))
     return datetime.combine(base_date, close_time).replace(tzinfo=UTC)
 
+
+def _get_nth_trading_day(
+    repo: OHLCVRepository,
+    asset_id: str,
+    start_date: str,
+    n: int,
+    provider: str | None = None,
+) -> tuple[str | None, Decimal | None]:
+    """기준일로부터 N번째 유효 거래일의 날짜와 종가 반환.
+
+    N=1이면 기준일 다음 거래일, N=5이면 5번째 거래일.
+    시장 캘린더 기준으로 주말/휴장일 제외된 실제 거래일만 카운트.
+    """
+    market = Market.KRX if asset_id.startswith("KRX:") else Market.US
+    calendar = get_calendar(market)
+
+    # 검색 범위: 넉넉하게 50일 + 버퍼
+    end_search = (date.fromisoformat(start_date) + timedelta(days=80)).isoformat()
+    ohlcv_list = repo.get_range(asset_id, start_date, end_search, provider=provider)
+    if not ohlcv_list:
+        return None, None
+
+    # OHLCV 데이터가 있는 날짜만 거래일로 간주 (캘린더와 결합)
+    ohlcv_dates = {ohlcv.timestamp.date() for ohlcv in ohlcv_list}
+    current = date.fromisoformat(start_date)
+    count = 0
+    max_iterations = 200  # 최대 200일까지 검색 (안전장치)
+
+    while count < n and max_iterations > 0:
+        current = date.fromordinal(current.toordinal() + 1)
+        max_iterations -= 1
+        if current not in ohlcv_dates:
+            continue
+        if not calendar.is_business_day(current):
+            continue
+        count += 1
+        if count == n:
+            # 해당 날짜의 OHLCV 찾기
+            for ohlcv in ohlcv_list:
+                if ohlcv.timestamp.date() == current:
+                    return current.isoformat(), ohlcv.close
+            break
+
+    return None, None
+
+
+def _check_price_confirmation_time(
+    ohlcv: OHLCV | None,
+    as_of: datetime,
+    boundary_label: str,
+    reasons: list[str],
+) -> bool:
+    """종가 확정 시각 검증 - as_of 기준으로 확인."""
+    if ohlcv is None:
+        return False
+    market_close_utc = _get_market_close_utc(ohlcv.market.value, ohlcv.timestamp.date().isoformat())
+    if as_of < market_close_utc:
+        reasons.append(
+            f"{boundary_label}: 종가 확정 시각({market_close_utc.isoformat()}) 이후 평가 필요 "
+            f"(평가 기준: {as_of.isoformat()})"
+        )
+        return False
+    return True
+
+
+def _evaluate_single_horizon(
+    decision: Decision,
+    base_price: Decimal,
+    base_price_date: str,
+    base_price_provider: str | None,
+    horizon_days: int,
+    repo: OHLCVRepository,
+    asset_id: str,
+    provider: str | None,
+    as_of: datetime,
+) -> HorizonEvaluation:
+    """단일 평가 기간(1D/5D/20D) 평가."""
+    # NO_TRADE, BLOCKED, ERROR는 방향 적중률 평가 제외
+    if decision.outcome != DecisionOutcome.TRADE or decision.side is None:
+        return HorizonEvaluation(
+            horizon_days=horizon_days,
+            price=None,
+            price_date=None,
+            return_pct=None,
+            hit=None,
+            status=EvaluationStatus.EXCLUDED,
+            reason=f"방향 적중률 평가 제외: {decision.outcome.value}",
+        )
+
+    # N번째 거래일 종가 조회
+    price_date, price = _get_nth_trading_day(repo, asset_id, base_price_date, horizon_days, provider=provider)
+
+    if price is None or price_date is None:
+        return HorizonEvaluation(
+            horizon_days=horizon_days,
+            price=None,
+            price_date=None,
+            return_pct=None,
+            hit=None,
+            status=EvaluationStatus.UNAVAILABLE,
+            reason=f"{horizon_days}거래일 후 가격 데이터 없음",
+        )
+
+    # 평가 대상 종가의 확정 시각 검증
+    eval_ohlcv, _ = _get_closest_ohlcv(
+        repo, asset_id,
+        datetime.fromisoformat(price_date + "T00:00:00").replace(tzinfo=UTC),
+        provider=provider
+    )
+    reasons: list[str] = []
+    if not _check_price_confirmation_time(eval_ohlcv, as_of, f"{horizon_days}거래일 후 평가", reasons):
+        return HorizonEvaluation(
+            horizon_days=horizon_days,
+            price=None,
+            price_date=price_date,
+            return_pct=None,
+            hit=None,
+            status=EvaluationStatus.PENDING,
+            reason=reasons[0] if reasons else f"{horizon_days}거래일 후 평가: 종가 확정 시각 이후 평가 필요",
+        )
+
+    # 가격 변화율 계산
+    return_pct = ((price / base_price - Decimal("1")) * Decimal("100")).quantize(Decimal("0.0001"))
+
+    # 적중 여부 판단
+    hit: bool | None = None
+    if decision.side == OrderSide.BUY:
+        if return_pct > Decimal("0"):
+            hit = True
+        elif return_pct < Decimal("0"):
+            hit = False
+        else:
+            hit = None  # NEUTRAL
+    elif decision.side == OrderSide.SELL:
+        if return_pct < Decimal("0"):
+            hit = True
+        elif return_pct > Decimal("0"):
+            hit = False
+        else:
+            hit = None  # NEUTRAL
+
+    return HorizonEvaluation(
+        horizon_days=horizon_days,
+        price=price,
+        price_date=price_date,
+        return_pct=return_pct,
+        hit=hit,
+        status=EvaluationStatus.COMPLETED,
+        reason=None,
+    )
+
+
 def _get_closest_ohlcv(
     repo: OHLCVRepository,
     asset_id: str,
@@ -137,6 +309,7 @@ def _get_closest_ohlcv(
     provider: str | None = None,
     max_days_back: int = 10,
 ) -> tuple[OHLCV | None, str | None]:
+    """기준 시점 이전/당일의 가장 가까운 OHLCV 조회."""
     target_date = target_dt.date().isoformat()
     search_start = (target_dt - timedelta(days=max_days_back)).date().isoformat()
     ohlcv_list = repo.get_range(asset_id, search_start, target_date, provider=provider)
@@ -147,43 +320,6 @@ def _get_closest_ohlcv(
             return ohlcv, ohlcv.timestamp.date().isoformat()
     return None, None
 
-def _get_trading_day_offset(
-    repo: OHLCVRepository,
-    asset_id: str,
-    start_date: str,
-    offset_days: int,
-    provider: str | None = None,
-) -> tuple[str | None, Decimal | None]:
-    end_search = (datetime.fromisoformat(start_date).date() + timedelta(days=50)).isoformat()
-    ohlcv_list = repo.get_range(asset_id, start_date, end_search, provider=provider)
-    if not ohlcv_list:
-        return None, None
-    valid_days = [
-        ohlcv for ohlcv in ohlcv_list
-        if ohlcv.timestamp.date() > datetime.fromisoformat(start_date).date()
-    ]
-    valid_days.sort(key=lambda x: x.timestamp.date())
-    if len(valid_days) < offset_days:
-        return None, None
-    target = valid_days[offset_days - 1]
-    return target.timestamp.date().isoformat(), target.close
-
-def _check_price_confirmation_time(
-    ohlcv: OHLCV | None,
-    as_of: datetime,
-    boundary_label: str,
-    reasons: list[str],
-) -> bool:
-    if ohlcv is None:
-        return False
-    market_close_utc = _get_market_close_utc(ohlcv.market, ohlcv.timestamp.date().isoformat())
-    if as_of < market_close_utc:
-        reasons.append(
-            f"{boundary_label}: 종가 확정 시각({market_close_utc.isoformat()}) 이후 평가 필요 "
-            f"(평가 기준: {as_of.isoformat()})"
-        )
-        return False
-    return True
 
 def evaluate_decision(
     decision: Decision,
@@ -221,18 +357,9 @@ def evaluate_decision(
             base_price=None,
             base_price_date=None,
             base_price_provider=None,
-            horizon_1d_price=None,
-            horizon_1d_return_pct=None,
-            horizon_1d_hit=None,
-            horizon_1d_reason="Thesis를 찾을 수 없음",
-            horizon_5d_price=None,
-            horizon_5d_return_pct=None,
-            horizon_5d_hit=None,
-            horizon_5d_reason="Thesis를 찾을 수 없음",
-            horizon_20d_price=None,
-            horizon_20d_return_pct=None,
-            horizon_20d_hit=None,
-            horizon_20d_reason="Thesis를 찾을 수 없음",
+            horizon_1d=HorizonEvaluation(1, None, None, None, None, EvaluationStatus.UNAVAILABLE, "Thesis를 찾을 수 없음"),
+            horizon_5d=HorizonEvaluation(5, None, None, None, None, EvaluationStatus.UNAVAILABLE, "Thesis를 찾을 수 없음"),
+            horizon_20d=HorizonEvaluation(20, None, None, None, None, EvaluationStatus.UNAVAILABLE, "Thesis를 찾을 수 없음"),
             evaluable=False,
             non_evaluable_reasons=["Thesis를 찾을 수 없음"],
         )
@@ -244,17 +371,19 @@ def evaluate_decision(
     if as_of is None:
         as_of = datetime.now(UTC)
 
+    # 기준 가격 조회 (결정 시점 이전/당일 가장 가까운 종가)
     base_ohlcv, base_price_date = _get_closest_ohlcv(
-        ohlcv_repo, asset_id, decided_at, provider=provider, max_days_back=10
+        ohlcv_repo, asset_id, decided_at, provider=provider, max_days_back=max_days_back
     )
 
     base_price = None
     base_price_provider = None
     if base_ohlcv:
         base_price = base_ohlcv.close
-        base_price_provider = base_ohlcv.provider if hasattr(base_ohlcv, "provider") else "OHLCV"
+        base_price_provider = base_ohlcv.provider
 
-    if base_price is None or base_price <= 0:
+    # 기준 가격 검증
+    if base_price is None or base_price <= Decimal("0"):
         return DecisionEvaluation(
             decision_id=decision.id,
             thesis_id=decision.thesis_id,
@@ -267,69 +396,43 @@ def evaluate_decision(
             base_price=base_price,
             base_price_date=base_price_date,
             base_price_provider=base_price_provider,
-            horizon_1d_price=None,
-            horizon_1d_return_pct=None,
-            horizon_1d_hit=None,
-            horizon_1d_reason="기준 가격 없음 또는 0 이하",
-            horizon_5d_price=None,
-            horizon_5d_return_pct=None,
-            horizon_5d_hit=None,
-            horizon_5d_reason="기준 가격 없음 또는 0 이하",
-            horizon_20d_price=None,
-            horizon_20d_return_pct=None,
-            horizon_20d_hit=None,
-            horizon_20d_reason="기준 가격 없음 또는 0 이하",
+            horizon_1d=HorizonEvaluation(1, None, None, None, None, EvaluationStatus.INVALID, "기준 가격 없음 또는 0 이하"),
+            horizon_5d=HorizonEvaluation(5, None, None, None, None, EvaluationStatus.INVALID, "기준 가격 없음 또는 0 이하"),
+            horizon_20d=HorizonEvaluation(20, None, None, None, None, EvaluationStatus.INVALID, "기준 가격 없음 또는 0 이하"),
             evaluable=False,
             non_evaluable_reasons=["기준 가격 없음 또는 0 이하"],
         )
 
-    results = {}
-    for horizon in horizons:
-        price_date, price = _get_trading_day_offset(
-            ohlcv_repo, asset_id, base_price_date or "", horizon, provider=provider
+    # 기준 가격의 확정 시각 검증
+    base_reasons: list[str] = []
+    if not _check_price_confirmation_time(base_ohlcv, as_of, "기준 가격", base_reasons):
+        return DecisionEvaluation(
+            decision_id=decision.id,
+            thesis_id=decision.thesis_id,
+            asset_id=asset_id,
+            model_provider=decision.model_provider,
+            model_name=decision.model_name,
+            outcome=decision.outcome,
+            side=decision.side,
+            decided_at=decided_at,
+            base_price=base_price,
+            base_price_date=base_price_date,
+            base_price_provider=base_price_provider,
+            horizon_1d=HorizonEvaluation(1, None, None, None, None, EvaluationStatus.PENDING, base_reasons[0]),
+            horizon_5d=HorizonEvaluation(5, None, None, None, None, EvaluationStatus.PENDING, base_reasons[0]),
+            horizon_20d=HorizonEvaluation(20, None, None, None, None, EvaluationStatus.PENDING, base_reasons[0]),
+            evaluable=False,
+            non_evaluable_reasons=base_reasons,
         )
 
-        horizon_price = None
-        horizon_return = None
-        horizon_hit = None
-        horizon_reason = None
+    # 각 평가 기간별 계산
+    h1 = _evaluate_single_horizon(decision, base_price, base_price_date, base_price_provider, 1, ohlcv_repo, asset_id, provider, as_of)
+    h5 = _evaluate_single_horizon(decision, base_price, base_price_date, base_price_provider, 5, ohlcv_repo, asset_id, provider, as_of)
+    h20 = _evaluate_single_horizon(decision, base_price, base_price_date, base_price_provider, 20, ohlcv_repo, asset_id, provider, as_of)
 
-        if price is None or price_date is None:
-            horizon_reason = f"{horizon}거래일 후 가격 데이터 없음"
-        else:
-            # 평가 대상 종가의 확정 시각 검증 - as_of 기준으로 확인
-            eval_ohlcv, _ = _get_closest_ohlcv(
-                ohlcv_repo, asset_id, datetime.fromisoformat(price_date + "T00:00:00").replace(tzinfo=UTC),
-                provider=provider
-            )
-            if not _check_price_confirmation_time(eval_ohlcv, as_of, f"{horizon}일 후 평가", []):
-                horizon_reason = f"{horizon}일 후 평가: 종가 확정 시각 이후 평가 필요 (as_of={as_of.isoformat()})"
-            else:
-                horizon_price = price
-                return_pct = ((price / base_price - Decimal("1")) * Decimal("100")).quantize(Decimal("0.0001"))
-                horizon_return = return_pct
-
-                if decision.outcome == DecisionOutcome.TRADE and decision.side == OrderSide.BUY:
-                    horizon_hit = return_pct > Decimal("0")
-                    if return_pct == Decimal("0"):
-                        horizon_hit = None
-                elif decision.outcome == DecisionOutcome.TRADE and decision.side == OrderSide.SELL:
-                    horizon_hit = return_pct < Decimal("0")
-                    if return_pct == Decimal("0"):
-                        horizon_hit = None
-                else:
-                    horizon_hit = None
-
-        results[horizon] = {
-            "price": horizon_price,
-            "date": price_date,
-            "return_pct": horizon_return,
-            "hit": horizon_hit,
-            "reason": horizon_reason,
-        }
-
-    evaluable = all(r["price"] is not None for r in results.values())
-    non_evaluable_reasons = [r["reason"] for r in results.values() if r["price"] is None]
+    # 전체 평가 가능 여부: 모든 기간이 COMPLETED인 경우
+    all_completed = all(h.status == EvaluationStatus.COMPLETED for h in [h1, h5, h20])
+    non_eval_reasons = [h.reason for h in [h1, h5, h20] if h.status != EvaluationStatus.COMPLETED and h.reason]
 
     return DecisionEvaluation(
         decision_id=decision.id,
@@ -343,21 +446,13 @@ def evaluate_decision(
         base_price=base_price,
         base_price_date=base_price_date,
         base_price_provider=base_price_provider,
-        horizon_1d_price=results.get(1, {}).get("price"),
-        horizon_1d_return_pct=results.get(1, {}).get("return_pct"),
-        horizon_1d_hit=results.get(1, {}).get("hit"),
-        horizon_1d_reason=results.get(1, {}).get("reason"),
-        horizon_5d_price=results.get(5, {}).get("price"),
-        horizon_5d_return_pct=results.get(5, {}).get("return_pct"),
-        horizon_5d_hit=results.get(5, {}).get("hit"),
-        horizon_5d_reason=results.get(5, {}).get("reason"),
-        horizon_20d_price=results.get(20, {}).get("price"),
-        horizon_20d_return_pct=results.get(20, {}).get("return_pct"),
-        horizon_20d_hit=results.get(20, {}).get("hit"),
-        horizon_20d_reason=results.get(20, {}).get("reason"),
-        evaluable=evaluable,
-        non_evaluable_reasons=non_evaluable_reasons,
+        horizon_1d=h1,
+        horizon_5d=h5,
+        horizon_20d=h20,
+        evaluable=all_completed,
+        non_evaluable_reasons=non_eval_reasons,
     )
+
 
 def evaluate_decisions(
     db_path: str,
@@ -414,6 +509,8 @@ def evaluate_decisions(
     model_summaries = _compute_model_summaries(evaluations)
 
     return evaluations, model_summaries
+
+
 def _compute_model_summaries(evaluations: list[DecisionEvaluation]) -> list[ModelEvaluationSummary]:
     """모델별 평가 요약 계산."""
     model_groups: dict[tuple[str, str], list[DecisionEvaluation]] = defaultdict(list)
@@ -432,12 +529,18 @@ def _compute_model_summaries(evaluations: list[DecisionEvaluation]) -> list[Mode
         error_count = sum(1 for e in evals if e.outcome == DecisionOutcome.ERROR)
 
         evaluated = sum(1 for e in evals if e.evaluable)
-        unevaluable = sum(1 for e in evals if not e.evaluable)
+        pending = sum(1 for e in evals if not e.evaluable and any(
+            h.status == EvaluationStatus.PENDING for h in [e.horizon_1d, e.horizon_5d, e.horizon_20d]
+        ))
+        unevaluable = sum(1 for e in evals if not e.evaluable and not any(
+            h.status == EvaluationStatus.PENDING for h in [e.horizon_1d, e.horizon_5d, e.horizon_20d]
+        ))
 
-        buy_1d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.BUY and e.horizon_1d_hit is not None]
-        sell_1d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.SELL and e.horizon_1d_hit is not None]
-        buy_hit_1d = sum(1 for e in buy_1d if e.horizon_1d_hit)
-        sell_hit_1d = sum(1 for e in sell_1d if e.horizon_1d_hit)
+        # 1D 적중률 계산
+        buy_1d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.BUY and e.horizon_1d.hit is not None]
+        sell_1d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.SELL and e.horizon_1d.hit is not None]
+        buy_hit_1d = sum(1 for e in buy_1d if e.horizon_1d.hit)
+        sell_hit_1d = sum(1 for e in sell_1d if e.horizon_1d.hit)
         total_1d = len(buy_1d) + len(sell_1d)
         total_hit_1d = buy_hit_1d + sell_hit_1d
 
@@ -445,10 +548,11 @@ def _compute_model_summaries(evaluations: list[DecisionEvaluation]) -> list[Mode
         sell_hit_rate_1d = (Decimal(sell_hit_1d) / Decimal(len(sell_1d)) * Decimal("100")).quantize(Decimal("0.01")) if sell_1d else None
         total_hit_rate_1d = (Decimal(total_hit_1d) / Decimal(total_1d) * Decimal("100")).quantize(Decimal("0.01")) if total_1d else None
 
-        buy_5d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.BUY and e.horizon_5d_hit is not None]
-        sell_5d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.SELL and e.horizon_5d_hit is not None]
-        buy_hit_5d = sum(1 for e in buy_5d if e.horizon_5d_hit)
-        sell_hit_5d = sum(1 for e in sell_5d if e.horizon_5d_hit)
+        # 5D 적중률 계산
+        buy_5d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.BUY and e.horizon_5d.hit is not None]
+        sell_5d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.SELL and e.horizon_5d.hit is not None]
+        buy_hit_5d = sum(1 for e in buy_5d if e.horizon_5d.hit)
+        sell_hit_5d = sum(1 for e in sell_5d if e.horizon_5d.hit)
         total_5d = len(buy_5d) + len(sell_5d)
         total_hit_5d = buy_hit_5d + sell_hit_5d
 
@@ -456,10 +560,11 @@ def _compute_model_summaries(evaluations: list[DecisionEvaluation]) -> list[Mode
         sell_hit_rate_5d = (Decimal(sell_hit_5d) / Decimal(len(sell_5d)) * Decimal("100")).quantize(Decimal("0.01")) if sell_5d else None
         total_hit_rate_5d = (Decimal(total_hit_5d) / Decimal(total_5d) * Decimal("100")).quantize(Decimal("0.01")) if total_5d else None
 
-        buy_20d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.BUY and e.horizon_20d_hit is not None]
-        sell_20d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.SELL and e.horizon_20d_hit is not None]
-        buy_hit_20d = sum(1 for e in buy_20d if e.horizon_20d_hit)
-        sell_hit_20d = sum(1 for e in sell_20d if e.horizon_20d_hit)
+        # 20D 적중률 계산
+        buy_20d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.BUY and e.horizon_20d.hit is not None]
+        sell_20d = [e for e in evals if e.outcome == DecisionOutcome.TRADE and e.side == OrderSide.SELL and e.horizon_20d.hit is not None]
+        buy_hit_20d = sum(1 for e in buy_20d if e.horizon_20d.hit)
+        sell_hit_20d = sum(1 for e in sell_20d if e.horizon_20d.hit)
         total_20d = len(buy_20d) + len(sell_20d)
         total_hit_20d = buy_hit_20d + sell_hit_20d
 
@@ -467,9 +572,10 @@ def _compute_model_summaries(evaluations: list[DecisionEvaluation]) -> list[Mode
         sell_hit_rate_20d = (Decimal(sell_hit_20d) / Decimal(len(sell_20d)) * Decimal("100")).quantize(Decimal("0.01")) if sell_20d else None
         total_hit_rate_20d = (Decimal(total_hit_20d) / Decimal(total_20d) * Decimal("100")).quantize(Decimal("0.01")) if total_20d else None
 
-        returns_1d = [e.horizon_1d_return_pct for e in evals if e.horizon_1d_return_pct is not None]
-        returns_5d = [e.horizon_5d_return_pct for e in evals if e.horizon_5d_return_pct is not None]
-        returns_20d = [e.horizon_20d_return_pct for e in evals if e.horizon_20d_return_pct is not None]
+        # 평균 수익률 (가격 변화율)
+        returns_1d = [e.horizon_1d.return_pct for e in evals if e.horizon_1d.return_pct is not None]
+        returns_5d = [e.horizon_5d.return_pct for e in evals if e.horizon_5d.return_pct is not None]
+        returns_20d = [e.horizon_20d.return_pct for e in evals if e.horizon_20d.return_pct is not None]
 
         avg_return_1d = (sum(returns_1d) / len(returns_1d)).quantize(Decimal("0.0001")) if returns_1d else None
         avg_return_5d = (sum(returns_5d) / len(returns_5d)).quantize(Decimal("0.0001")) if returns_5d else None
@@ -490,7 +596,7 @@ def _compute_model_summaries(evaluations: list[DecisionEvaluation]) -> list[Mode
             blocked_count=blocked_count,
             error_count=error_count,
             evaluated_count=evaluated,
-            pending_count=0,
+            pending_count=pending,
             unevaluable_count=unevaluable,
             buy_hit_rate_1d=buy_hit_rate_1d,
             sell_hit_rate_1d=sell_hit_rate_1d,

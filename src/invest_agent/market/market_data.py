@@ -191,6 +191,7 @@ class OHLCV:
     volume: int
     asset_id: str
     market: Market
+    provider: str | None = None
 
     def is_valid(self) -> bool:
         """데이터 유효성 검사."""

@@ -1171,4 +1171,5 @@ class OHLCVRepository:
             volume=row["volume"],
             asset_id=row["asset_id"],
             market=Market.KRX if row["asset_id"].startswith("KRX:") else Market.US,
+            provider=row["provider"],
         )

@@ -58,6 +58,11 @@ def _validate_date(date_str: str) -> str:
 decisions_app = typer.Typer(name="decisions", help="AI 의사결정 평가")
 app.add_typer(decisions_app)
 
+# Leaderboard app (NEW - from P1-10B-23)
+# ---------------------------------------------------------------------------
+leaderboard_app = typer.Typer(name="leaderboard", help="AI 모델 성과 리더보드")
+app.add_typer(leaderboard_app)
+
 @decisions_app.command("evaluate")
 def decisions_evaluate(
     limit: Annotated[
@@ -297,6 +302,97 @@ def decisions_evaluate(
     console.print(
         "[dim]가격 변화율 0은 중립으로 분류되며 적중률 분모에서 제외됩니다.[/dim]"
     )
+
+
+# Leaderboard commands
+@leaderboard_app.command("show")
+def leaderboard_show(
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-l", help="조회할 의사결정 개수 (기본값: 50)", min=1, max=200),
+    ] = 50,
+    db_path: Annotated[
+        str, typer.Option("--db", "-d", help="SQLite DB 경로")
+    ] = "data/agent.db",
+    asset: Annotated[
+        str | None, typer.Option("--asset", "-a", help="특정 종목만 평가 (예: KRX:005930)")
+    ] = None,
+    horizon: Annotated[
+        int | None, typer.Option("--horizon", help="평가 기간 필터 (1, 5, 20 중 하나, 기본값: 전체)")
+    ] = None,
+    as_of: Annotated[
+        str | None, typer.Option("--as-of", help="평가 기준 시점 (ISO 8601, 기본값: 현재 UTC)")
+    ] = None,
+    provider: Annotated[
+        str | None, typer.Option("--provider", "-p", help="OHLCV 공급자 지정 (기본값: 자동)")
+    ] = None,
+    min_evaluated: Annotated[
+        int, typer.Option("--min-evaluated", help="리더보드 포함 최소 평가 완료 결정 수 (기본값: 5)", min=1)
+    ] = 5,
+    sort_by: Annotated[
+        str, typer.Option("--sort-by", help="정렬 기준: hit_rate (적중률) 또는 return (수익률)", case_sensitive=False)
+    ] = "hit_rate",
+    primary_horizon: Annotated[
+        int, typer.Option("--primary-horizon", help="주 정렬 기준 기간 (1, 5, 20, 기본값: 20)", min=1, max=20)
+    ] = 20,
+    json_output: Annotated[
+        bool, typer.Option("--json", "-j", help="JSON 형식으로 출력")
+    ] = False,
+) -> None:
+    """AI 모델 성과 리더보드 표시.
+
+    평가된 모델들을 적중률과 수익률 기준으로 순위 매겨 표시합니다.
+
+    예시:
+        uv run invest leaderboard show --db data/agent.db
+        uv run invest leaderboard show --db data/agent.db --min-evaluated 10
+        uv run invest leaderboard show --db data/agent.db --sort-by return
+        uv run invest leaderboard show --db data/agent.db --primary-horizon 5
+        uv run invest leaderboard show --db data/agent.db --json
+    """
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        from invest_agent.leaderboard import (
+            build_leaderboard,
+            leaderboard_to_dict,
+            print_leaderboard,
+        )
+
+        if sort_by.lower() not in ("hit_rate", "return"):
+            console.print(f"[red]잘못된 정렬 기준: {sort_by}. 'hit_rate' 또는 'return'을 사용하세요.[/red]")
+            raise typer.Exit(1)
+
+        if primary_horizon not in (1, 5, 20):
+            console.print(f"[red]잘못된 평가 기간: {primary_horizon}. 1, 5, 20 중 하나여야 합니다.[/red]")
+            raise typer.Exit(1)
+
+        leaderboard = build_leaderboard(
+            db_path=db_path,
+            limit=limit,
+            asset=asset,
+            horizon=horizon,
+            as_of=as_of,
+            provider=provider,
+            min_evaluated_decisions=min_evaluated,
+            primary_horizon=primary_horizon,
+            secondary_metric=sort_by.lower(),
+        )
+
+        if json_output:
+            import json
+            console.print_json(json.dumps(leaderboard_to_dict(leaderboard), ensure_ascii=False, indent=2))
+        else:
+            print_leaderboard(leaderboard)
+
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]리더보드 생성 중 오류: {e}[/red]")
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------

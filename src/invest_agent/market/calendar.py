@@ -18,7 +18,26 @@ class Holiday:
     early_close_time: str | None = None  # "HH:MM" 형식
 
 
-# KRX 휴장일 (2024년 기준)
+# KRX 휴장일 (2023-2025년)
+KRX_HOLIDAYS_2023 = [
+    Holiday(date(2023, 1, 1), "신정", Market.KRX),
+    Holiday(date(2023, 1, 21), "설날 연휴", Market.KRX),
+    Holiday(date(2023, 1, 22), "설날", Market.KRX),
+    Holiday(date(2023, 1, 23), "설날 연휴", Market.KRX),
+    Holiday(date(2023, 1, 24), "설날 대체공휴일", Market.KRX),
+    Holiday(date(2023, 3, 1), "삼일절", Market.KRX),
+    Holiday(date(2023, 5, 5), "어린이날", Market.KRX),
+    Holiday(date(2023, 5, 27), "석가탄신일", Market.KRX),
+    Holiday(date(2023, 6, 6), "현충일", Market.KRX),
+    Holiday(date(2023, 8, 15), "광복절", Market.KRX),
+    Holiday(date(2023, 9, 28), "추석 연휴", Market.KRX),
+    Holiday(date(2023, 9, 29), "추석", Market.KRX),
+    Holiday(date(2023, 9, 30), "추석 연휴", Market.KRX),
+    Holiday(date(2023, 10, 3), "개천절", Market.KRX),
+    Holiday(date(2023, 10, 9), "한글날", Market.KRX),
+    Holiday(date(2023, 12, 25), "성탄절", Market.KRX),
+]
+
 KRX_HOLIDAYS_2024 = [
     Holiday(date(2024, 1, 1), "신정", Market.KRX),
     Holiday(date(2024, 2, 9), "설날 연휴", Market.KRX),
@@ -40,7 +59,38 @@ KRX_HOLIDAYS_2024 = [
     Holiday(date(2024, 12, 25), "성탄절", Market.KRX),
 ]
 
-# US 휴장일 (2024년 기준)
+KRX_HOLIDAYS_2025 = [
+    Holiday(date(2025, 1, 1), "신정", Market.KRX),
+    Holiday(date(2025, 1, 28), "설날 연휴", Market.KRX),
+    Holiday(date(2025, 1, 29), "설날", Market.KRX),
+    Holiday(date(2025, 1, 30), "설날 연휴", Market.KRX),
+    Holiday(date(2025, 3, 1), "삼일절", Market.KRX),
+    Holiday(date(2025, 5, 5), "어린이날", Market.KRX),
+    Holiday(date(2025, 5, 6), "석가탄신일 대체공휴일", Market.KRX),
+    Holiday(date(2025, 6, 6), "현충일", Market.KRX),
+    Holiday(date(2025, 8, 15), "광복절", Market.KRX),
+    Holiday(date(2025, 10, 3), "개천절", Market.KRX),
+    Holiday(date(2025, 10, 6), "추석 연휴", Market.KRX),
+    Holiday(date(2025, 10, 7), "추석", Market.KRX),
+    Holiday(date(2025, 10, 8), "추석 연휴", Market.KRX),
+    Holiday(date(2025, 10, 9), "한글날", Market.KRX),
+    Holiday(date(2025, 12, 25), "성탄절", Market.KRX),
+]
+
+# US 휴장일 (2023-2025년)
+US_HOLIDAYS_2023 = [
+    Holiday(date(2023, 1, 2), "New Year's Day (observed)", Market.US),
+    Holiday(date(2023, 1, 16), "Martin Luther King Jr. Day", Market.US),
+    Holiday(date(2023, 2, 20), "Presidents' Day", Market.US),
+    Holiday(date(2023, 4, 7), "Good Friday", Market.US),
+    Holiday(date(2023, 5, 29), "Memorial Day", Market.US),
+    Holiday(date(2023, 6, 19), "Juneteenth", Market.US),
+    Holiday(date(2023, 7, 4), "Independence Day", Market.US),
+    Holiday(date(2023, 9, 4), "Labor Day", Market.US),
+    Holiday(date(2023, 11, 23), "Thanksgiving Day", Market.US),
+    Holiday(date(2023, 12, 25), "Christmas Day", Market.US),
+]
+
 US_HOLIDAYS_2024 = [
     Holiday(date(2024, 1, 1), "New Year's Day", Market.US),
     Holiday(date(2024, 1, 15), "Martin Luther King Jr. Day", Market.US),
@@ -54,16 +104,49 @@ US_HOLIDAYS_2024 = [
     Holiday(date(2024, 12, 25), "Christmas Day", Market.US),
 ]
 
-# 조기 종료일
+US_HOLIDAYS_2025 = [
+    Holiday(date(2025, 1, 1), "New Year's Day", Market.US),
+    Holiday(date(2025, 1, 20), "Martin Luther King Jr. Day", Market.US),
+    Holiday(date(2025, 2, 17), "Presidents' Day", Market.US),
+    Holiday(date(2025, 4, 18), "Good Friday", Market.US),
+    Holiday(date(2025, 5, 26), "Memorial Day", Market.US),
+    Holiday(date(2025, 6, 19), "Juneteenth", Market.US),
+    Holiday(date(2025, 7, 4), "Independence Day", Market.US),
+    Holiday(date(2025, 9, 1), "Labor Day", Market.US),
+    Holiday(date(2025, 11, 27), "Thanksgiving Day", Market.US),
+    Holiday(date(2025, 12, 25), "Christmas Day", Market.US),
+]
+
+# US 조기 종료일 (2023-2025년)
+US_EARLY_CLOSE_2023 = [
+    Holiday(date(2023, 7, 3), "Independence Day Eve", Market.US, is_early_close=True, early_close_time="13:00"),
+    Holiday(date(2023, 11, 24), "Day after Thanksgiving", Market.US, is_early_close=True, early_close_time="13:00"),
+    Holiday(date(2023, 12, 24), "Christmas Eve", Market.US, is_early_close=True, early_close_time="13:00"),
+]
+
 US_EARLY_CLOSE_2024 = [
     Holiday(date(2024, 7, 3), "Independence Day Eve", Market.US, is_early_close=True, early_close_time="13:00"),
     Holiday(date(2024, 11, 29), "Day after Thanksgiving", Market.US, is_early_close=True, early_close_time="13:00"),
     Holiday(date(2024, 12, 24), "Christmas Eve", Market.US, is_early_close=True, early_close_time="13:00"),
 ]
 
+US_EARLY_CLOSE_2025 = [
+    Holiday(date(2025, 7, 3), "Independence Day Eve", Market.US, is_early_close=True, early_close_time="13:00"),
+    Holiday(date(2025, 11, 28), "Day after Thanksgiving", Market.US, is_early_close=True, early_close_time="13:00"),
+    Holiday(date(2025, 12, 24), "Christmas Eve", Market.US, is_early_close=True, early_close_time="13:00"),
+]
+
 MARKET_HOLIDAYS = {
-    Market.KRX: {2024: KRX_HOLIDAYS_2024},
-    Market.US: {2024: US_HOLIDAYS_2024 + US_EARLY_CLOSE_2024},
+    Market.KRX: {
+        2023: KRX_HOLIDAYS_2023,
+        2024: KRX_HOLIDAYS_2024,
+        2025: KRX_HOLIDAYS_2025,
+    },
+    Market.US: {
+        2023: US_HOLIDAYS_2023 + US_EARLY_CLOSE_2023,
+        2024: US_HOLIDAYS_2024 + US_EARLY_CLOSE_2024,
+        2025: US_HOLIDAYS_2025 + US_EARLY_CLOSE_2025,
+    },
 }
 
 
@@ -100,8 +183,14 @@ class MarketCalendar:
         return None
 
     def is_business_day(self, dt: date) -> bool:
-        """영업일 여부 (주말 + 휴장일 제외)."""
+        """영업일 여부 (주말 + 휴장일 제외).
+
+        검증되지 않은 연도의 경우 안전하게 False 반환 (거래일로 간주하지 않음).
+        """
         if dt.weekday() >= 5:  # 토(5), 일(6)
+            return False
+        # 해당 연도의 휴장일 데이터가 없으면 영업일로 간주하지 않음 (안전 차단)
+        if dt.year not in self._holidays_cache:
             return False
         return not self.is_holiday(dt)
 

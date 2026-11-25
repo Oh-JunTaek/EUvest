@@ -189,15 +189,20 @@ def decisions_evaluate(
             else:
                 return f"[red]{val:.2f}%[/red]"
 
-        r1d = fmt_return(eval_result.horizon_1d_return_pct)
-        r5d = fmt_return(eval_result.horizon_5d_return_pct)
-        r20d = fmt_return(eval_result.horizon_20d_return_pct)
+        # Use new HorizonEvaluation structure
+        h1 = eval_result.horizon_1d
+        h5 = eval_result.horizon_5d
+        h20 = eval_result.horizon_20d
+
+        r1d = fmt_return(h1.return_pct)
+        r5d = fmt_return(h5.return_pct)
+        r20d = fmt_return(h20.return_pct)
 
         hit_str = "-"
         if eval_result.outcome.value == "TRADE":
-            if eval_result.horizon_1d_hit is True:
+            if h1.hit is True:
                 hit_str = "[green]적중[/green]"
-            elif eval_result.horizon_1d_hit is False:
+            elif h1.hit is False:
                 hit_str = "[red]미적중[/red]"
             else:
                 hit_str = "[yellow]대기[/yellow]"

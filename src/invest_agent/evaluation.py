@@ -215,6 +215,28 @@ def _check_price_confirmation_time(
     return True
 
 
+def _check_price_confirmation_time_decided(
+    ohlcv: OHLCV | None,
+    decided_at: datetime,
+    boundary_label: str,
+    reasons: list[str],
+) -> bool:
+    """기준 가격 확정 시각 검증 - decision.decided_at 기준으로 확인.
+
+    판단 시점에 알 수 없었던 가격(미래 가격)을 기준가로 사용하지 않도록 검증.
+    """
+    if ohlcv is None:
+        return False
+    market_close_utc = _get_market_close_utc(ohlcv.market.value, ohlcv.timestamp.date().isoformat())
+    if decided_at < market_close_utc:
+        reasons.append(
+            f"{boundary_label}: 종가 확정 시각({market_close_utc.isoformat()}) 이후 판단 필요 "
+            f"(판단 시각: {decided_at.isoformat()})"
+        )
+        return False
+    return True
+
+
 def _evaluate_single_horizon(
     decision: Decision,
     base_price: Decimal,
@@ -330,6 +352,7 @@ def evaluate_decision(
     max_days_back: int = 10,
     as_of: datetime | None = None,
     provider: str | None = None,
+    horizon: int | None = None,
 ) -> DecisionEvaluation:
     """단일 의사결정 평가.
 
@@ -342,6 +365,7 @@ def evaluate_decision(
         max_days_back: 과거 데이터 검색 범위
         as_of: 평가 기준 시점 (기본값: 현재 UTC). 이 시점 이후 확정되는 가격은 사용하지 않음.
         provider: OHLCV 공급자 지정. 지정 시 해당 공급자 데이터만 사용.
+        horizon: 평가할 특정 기간 (1, 5, 20 중 하나). 지정 시 해당 기간만 평가.
     """
     thesis = thesis_repo.get(decision.thesis_id)
     if not thesis:
@@ -403,9 +427,9 @@ def evaluate_decision(
             non_evaluable_reasons=["기준 가격 없음 또는 0 이하"],
         )
 
-    # 기준 가격의 확정 시각 검증
+    # 기준 가격의 확정 시각 검증 - decision.decided_at 기준 (판단 시점에 알 수 없었던 가격 차단)
     base_reasons: list[str] = []
-    if not _check_price_confirmation_time(base_ohlcv, as_of, "기준 가격", base_reasons):
+    if not _check_price_confirmation_time_decided(base_ohlcv, decided_at, "기준 가격", base_reasons):
         return DecisionEvaluation(
             decision_id=decision.id,
             thesis_id=decision.thesis_id,
@@ -425,10 +449,29 @@ def evaluate_decision(
             non_evaluable_reasons=base_reasons,
         )
 
+    # 공급자 고정: 기준 가격의 공급자를 모든 후속 평가에 사용
+    fixed_provider = base_price_provider
+
+    # 평가 기간 결정 (CLI --horizon 옵션 반영)
+    eval_horizons = horizons
+    if horizon is not None:
+        if horizon in EVALUATION_HORIZONS:
+            eval_horizons = (horizon,)
+        else:
+            eval_horizons = ()
+
     # 각 평가 기간별 계산
-    h1 = _evaluate_single_horizon(decision, base_price, base_price_date, base_price_provider, 1, ohlcv_repo, asset_id, provider, as_of)
-    h5 = _evaluate_single_horizon(decision, base_price, base_price_date, base_price_provider, 5, ohlcv_repo, asset_id, provider, as_of)
-    h20 = _evaluate_single_horizon(decision, base_price, base_price_date, base_price_provider, 20, ohlcv_repo, asset_id, provider, as_of)
+    h1 = _evaluate_single_horizon(decision, base_price, base_price_date, base_price_provider, 1, ohlcv_repo, asset_id, fixed_provider, as_of) if 1 in eval_horizons else None
+    h5 = _evaluate_single_horizon(decision, base_price, base_price_date, base_price_provider, 5, ohlcv_repo, asset_id, fixed_provider, as_of) if 5 in eval_horizons else None
+    h20 = _evaluate_single_horizon(decision, base_price, base_price_date, base_price_provider, 20, ohlcv_repo, asset_id, fixed_provider, as_of) if 20 in eval_horizons else None
+
+    # 평가하지 않은 기간은 UNAVAILABLE로 표시
+    if h1 is None:
+        h1 = HorizonEvaluation(1, None, None, None, None, EvaluationStatus.UNAVAILABLE, "평가 범위 외 (horizon 옵션)")
+    if h5 is None:
+        h5 = HorizonEvaluation(5, None, None, None, None, EvaluationStatus.UNAVAILABLE, "평가 범위 외 (horizon 옵션)")
+    if h20 is None:
+        h20 = HorizonEvaluation(20, None, None, None, None, EvaluationStatus.UNAVAILABLE, "평가 범위 외 (horizon 옵션)")
 
     # 전체 평가 가능 여부: 모든 기간이 COMPLETED인 경우
     all_completed = all(h.status == EvaluationStatus.COMPLETED for h in [h1, h5, h20])
@@ -503,6 +546,7 @@ def evaluate_decisions(
             ohlcv_repo,
             as_of=as_of,
             provider=provider,
+            horizon=horizon,
         )
         evaluations.append(eval_result)
 

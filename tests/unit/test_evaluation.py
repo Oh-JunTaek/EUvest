@@ -100,7 +100,8 @@ class TestEvaluateDecision:
         )
         decision_repo.save(decision)
 
-        as_of = datetime(2025, 2, 1, 12, 0, 0, tzinfo=UTC)
+        # 20거래일 후 평가 기준: 2025-02-03(월) 06:30 UTC 이후 (설날 연휴로 20번째 거래일이 2/3)
+        as_of = datetime(2025, 2, 3, 12, 0, 0, tzinfo=UTC)
 
         eval_result = evaluate_decision(
             decision, thesis_repo, ohlcv_repo, as_of=as_of, provider="TestProvider"
@@ -148,7 +149,8 @@ class TestEvaluateDecision:
         )
         decision_repo.save(decision)
 
-        as_of = datetime(2025, 2, 1, 12, 0, 0, tzinfo=UTC)
+        # 20거래일 후 평가 기준: 2025-02-03(월) 06:30 UTC 이후
+        as_of = datetime(2025, 2, 3, 12, 0, 0, tzinfo=UTC)
 
         eval_result = evaluate_decision(
             decision, thesis_repo, ohlcv_repo, as_of=as_of, provider="TestProvider"
@@ -195,7 +197,8 @@ class TestEvaluateDecision:
         )
         decision_repo.save(decision)
 
-        as_of = datetime(2025, 2, 1, 12, 0, 0, tzinfo=UTC)
+        # 20거래일 후 평가 기준: 2025-02-03(월) 06:30 UTC 이후
+        as_of = datetime(2025, 2, 3, 12, 0, 0, tzinfo=UTC)
 
         eval_result = evaluate_decision(
             decision, thesis_repo, ohlcv_repo, as_of=as_of, provider="TestProvider"
@@ -241,7 +244,8 @@ class TestEvaluateDecision:
         )
         decision_repo.save(decision)
 
-        as_of = datetime(2025, 2, 1, 12, 0, 0, tzinfo=UTC)
+        # 20거래일 후 평가 기준: 2025-02-03(월) 06:30 UTC 이후
+        as_of = datetime(2025, 2, 3, 12, 0, 0, tzinfo=UTC)
 
         eval_result = evaluate_decision(
             decision, thesis_repo, ohlcv_repo, as_of=as_of, provider="TestProvider"
@@ -353,7 +357,8 @@ class TestEvaluateDecision:
         )
         decision_repo.save(decision)
 
-        as_of = datetime(2025, 2, 1, 12, 0, 0, tzinfo=UTC)
+        # 20거래일 후 평가 기준: 2025-02-03(월) 06:30 UTC 이후
+        as_of = datetime(2025, 2, 3, 12, 0, 0, tzinfo=UTC)
 
         # ProviderA로 평가
         eval_a = evaluate_decision(

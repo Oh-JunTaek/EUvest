@@ -327,7 +327,7 @@ def leaderboard_show(
         str | None, typer.Option("--provider", "-p", help="OHLCV 공급자 지정 (기본값: 자동)")
     ] = None,
     min_evaluated: Annotated[
-        int, typer.Option("--min-evaluated", help="리더보드 포함 최소 평가 완료 결정 수 (기본값: 5)", min=1)
+        int, typer.Option("--min-evaluated", help="리더보드 포함 최소 유효 표본 수(HIT+MISS, 기본값: 5)", min=1)
     ] = 5,
     sort_by: Annotated[
         str, typer.Option("--sort-by", help="정렬 기준: hit_rate (적중률) 또는 return (수익률)", case_sensitive=False)
@@ -376,7 +376,7 @@ def leaderboard_show(
             horizon=horizon,
             as_of=as_of,
             provider=provider,
-            min_evaluated_decisions=min_evaluated,
+            min_valid_samples=min_evaluated,
             primary_horizon=primary_horizon,
             secondary_metric=sort_by.lower(),
         )

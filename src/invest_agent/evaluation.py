@@ -161,37 +161,41 @@ def _get_nth_trading_day(
     """기준일로부터 N번째 유효 거래일의 날짜와 종가 반환.
 
     N=1이면 기준일 다음 거래일, N=5이면 5번째 거래일.
-    시장 캘린더 기준으로 주말/휴장일 제외된 실제 거래일만 카운트.
+    1. 시장 캘린더로 N번째 거래일 날짜를 먼저 확정
+    2. 해당 날짜의 정확한 OHLCV 조회
+    3. 데이터 없으면 UNAVAILABLE (임의 대체하지 않음)
     """
     market = Market.KRX if asset_id.startswith("KRX:") else Market.US
     calendar = get_calendar(market)
 
-    # 검색 범위: 넉넉하게 50일 + 버퍼
-    end_search = (date.fromisoformat(start_date) + timedelta(days=80)).isoformat()
-    ohlcv_list = repo.get_range(asset_id, start_date, end_search, provider=provider)
+    start_dt = date.fromisoformat(start_date)
+
+    # 1. 캘린더로 N번째 거래일 날짜 확정 (최대 1년 검색 제한)
+    target_date = start_dt
+    count = 0
+    max_search_days = 366  # 최대 1년 검색
+
+    while count < n and max_search_days > 0:
+        target_date = date.fromordinal(target_date.toordinal() + 1)
+        max_search_days -= 1
+        if calendar.is_business_day(target_date):
+            count += 1
+
+    if count < n:
+        # 지원 범위를 벗어남 (캘린더 데이터 없음)
+        return None, None
+
+    target_date_str = target_date.isoformat()
+
+    # 2. 확정된 날짜의 OHLCV 조회
+    ohlcv_list = repo.get_range(asset_id, target_date_str, target_date_str, provider=provider)
     if not ohlcv_list:
         return None, None
 
-    # OHLCV 데이터가 있는 날짜만 거래일로 간주 (캘린더와 결합)
-    ohlcv_dates = {ohlcv.timestamp.date() for ohlcv in ohlcv_list}
-    current = date.fromisoformat(start_date)
-    count = 0
-    max_iterations = 200  # 최대 200일까지 검색 (안전장치)
-
-    while count < n and max_iterations > 0:
-        current = date.fromordinal(current.toordinal() + 1)
-        max_iterations -= 1
-        if current not in ohlcv_dates:
-            continue
-        if not calendar.is_business_day(current):
-            continue
-        count += 1
-        if count == n:
-            # 해당 날짜의 OHLCV 찾기
-            for ohlcv in ohlcv_list:
-                if ohlcv.timestamp.date() == current:
-                    return current.isoformat(), ohlcv.close
-            break
+    # 해당 날짜의 OHLCV 찾기
+    for ohlcv in ohlcv_list:
+        if ohlcv.timestamp.date() == target_date:
+            return target_date_str, ohlcv.close
 
     return None, None
 

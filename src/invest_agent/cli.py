@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
@@ -63,7 +63,14 @@ app.add_typer(decisions_app)
 leaderboard_app = typer.Typer(name="leaderboard", help="AI 모델 성과 리더보드")
 app.add_typer(leaderboard_app)
 
-@decisions_app.command("evaluate")
+# Report app (NEW - from P1-10B-24)
+# ---------------------------------------------------------------------------
+report_app = typer.Typer(name="report", help="투자 실험 통합 리포트")
+app.add_typer(report_app)
+
+# ---------------------------------------------------------------------------
+# Decisions app (NEW - from P1-10B-22)
+# ---------------------------------------------------------------------------
 def decisions_evaluate(
     limit: Annotated[
         int,
@@ -393,6 +400,137 @@ def leaderboard_show(
     except Exception as e:
         console.print(f"[red]리더보드 생성 중 오류: {e}[/red]")
         raise typer.Exit(1)
+
+
+# Report commands
+@report_app.command("summary")
+def report_summary(
+    db_path: Annotated[
+        str, typer.Option("--db", "-d", help="SQLite DB 경로")
+    ] = "data/agent.db",
+    period: Annotated[
+        str, typer.Option("--period", "-p", help="리포트 기간 (weekly, monthly, custom)", case_sensitive=False)
+    ] = "weekly",
+    start: Annotated[
+        str | None, typer.Option("--start", help="시작일 (YYYY-MM-DD, custom일 때 필수)")
+    ] = None,
+    end: Annotated[
+        str | None, typer.Option("--end", help="종료일 (YYYY-MM-DD, custom일 때 필수)")
+    ] = None,
+    as_of: Annotated[
+        str | None, typer.Option("--as-of", help="평가 기준 시점 (ISO 8601, 기본값: 현재 UTC)")
+    ] = None,
+    output: Annotated[
+        str | None, typer.Option("--output", "-o", help="출력 파일 경로 (기본값: reports/summary_<period>_<date>.md)")
+    ] = None,
+    overwrite: Annotated[
+        bool, typer.Option("--overwrite", help="기존 파일 덮어쓰기")
+    ] = False,
+) -> None:
+    """투자 실험 통합 리포트 생성 (주간/월간/사용자 지정).
+
+    주간/월간/사용자 지정 기간의 투자 실험 결과를 종합 리포트로 생성합니다.
+
+    예시:
+        uv run invest report summary --db data/agent.db --period weekly
+        uv run invest report summary --db data/agent.db --period monthly
+        uv run invest report summary --db data/agent.db --period custom --start 2025-01-01 --end 2025-01-31
+        uv run invest report summary --db data/agent.db --period weekly --output reports/weekly.md
+    """
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        from invest_agent.reporting.summary import (
+            ReportPeriod,
+            format_summary_report_markdown,
+            generate_summary_report,
+        )
+
+        period_enum = ReportPeriod(period.lower())
+        start_dt = datetime.fromisoformat(start) if start else None
+        end_dt = datetime.fromisoformat(end) if end else None
+        as_of_dt = datetime.fromisoformat(as_of.replace('Z', '+00:00')) if as_of else None
+
+        report = generate_summary_report(
+            db_path=db_path,
+            period=period_enum,
+            start=start_dt,
+            end=end_dt,
+            as_of=as_of_dt,
+        )
+
+        markdown = format_summary_report_markdown(report)
+
+        if output is None:
+            period_str = period_enum.value
+            date_str = datetime.now(UTC).date().isoformat()
+            output = f"reports/summary_{period_str}_{date_str}.md"
+
+        output_path = Path(output)
+        if output_path.exists() and not overwrite:
+            console.print(f"[red]파일이 이미 존재합니다: {output} (--overwrite 옵션 필요)[/red]")
+            raise typer.Exit(1)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(markdown, encoding="utf-8")
+
+        console.print(f"[green]리포트 생성 완료: {output}[/green]")
+
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]리포트 생성 중 오류: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@report_app.command("daily")
+def report_daily(
+    db_path: Annotated[
+        str, typer.Option("--db", "-d", help="SQLite DB 경로")
+    ] = "data/agent.db",
+    date: Annotated[
+        str | None, typer.Option("--date", help="기준일 (YYYY-MM-DD, 기본값: 오늘)")
+    ] = None,
+    output: Annotated[
+        str | None, typer.Option("--output", "-o", help="출력 파일 경로 (미지정 시 콘솔 출력)")
+    ] = None,
+) -> None:
+    """일일 투자 실험 리포트 생성."""
+    if not Path(db_path).exists():
+        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
+        raise typer.Exit(1)
+
+    if date is None:
+        target_date = datetime.now(UTC)
+    else:
+        target_date = datetime.fromisoformat(date)
+
+    from invest_agent.reporting.daily import format_daily_report_markdown, generate_daily_report
+
+    console.print("[bold cyan]일일 리포트 생성[/bold cyan]")
+    console.print(f"기준일: {target_date.date().isoformat()}")
+    console.print()
+
+    try:
+        report = generate_daily_report(db_path=db_path, target_date=target_date)
+        report_md = format_daily_report_markdown(report)
+    except Exception as e:
+        console.print(f"[red]리포트 생성 실패: {e}[/red]")
+        raise typer.Exit(1)
+
+    if output:
+        out_path = Path(output)
+        if out_path.exists():
+            console.print(f"[red]파일이 이미 존재합니다: {output}[/red]")
+            console.print("[dim]덮어쓰기를 원하면 파일을 삭제 후 다시 실행하세요.[/dim]")
+            raise typer.Exit(1)
+        out_path.write_text(report_md, encoding="utf-8")
+        console.print(f"[green]리포트 저장 완료: {output}[/green]")
+    else:
+        console.print(report_md)
 
 
 # ---------------------------------------------------------------------------
@@ -1291,49 +1429,6 @@ def portfolio_benchmark(
 
 
 # ---------------------------------------------------------------------------
-# Report app
-# ---------------------------------------------------------------------------
-report_app = typer.Typer(name="report", help="리포트 생성")
-app.add_typer(report_app)
-
-@report_app.command("daily")
-def report_daily(
-    db_path: str = typer.Option("data/agent.db", "--db", "-d", help="SQLite DB 경로"),
-    date: str | None = typer.Option(None, "--date", help="기준일 (YYYY-MM-DD, 기본값: 오늘)"),
-    output: str | None = typer.Option(None, "--output", "-o", help="출력 파일 경로 (미지정 시 콘솔 출력)"),
-) -> None:
-    """일일 투자 실험 리포트 생성."""
-    if not Path(db_path).exists():
-        console.print(f"[red]DB 파일이 없습니다: {db_path}[/red]")
-        raise typer.Exit(1)
-
-    if date is None:
-        date = datetime.now().strftime("%Y-%m-%d")
-
-    from invest_agent.reporting.daily import generate_daily_report
-
-    console.print("[bold cyan]일일 리포트 생성[/bold cyan]")
-    console.print(f"기준일: {date}")
-    console.print()
-
-    try:
-        report_md = generate_daily_report(db_path=db_path, date=date)
-    except Exception as e:
-        console.print(f"[red]리포트 생성 실패: {e}[/red]")
-        raise typer.Exit(1)
-
-    if output:
-        out_path = Path(output)
-        if out_path.exists():
-            console.print(f"[red]파일이 이미 존재합니다: {output}[/red]")
-            console.print("[dim]덮어쓰기를 원하면 파일을 삭제 후 다시 실행하세요.[/dim]")
-            raise typer.Exit(1)
-        out_path.write_text(report_md, encoding="utf-8")
-        console.print(f"[green]리포트 저장 완료: {output}[/green]")
-    else:
-        console.print(report_md)
-
-
 # ---------------------------------------------------------------------------
 # Console & Main
 # ---------------------------------------------------------------------------

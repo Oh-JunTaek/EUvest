@@ -187,6 +187,7 @@ DDL_STATEMENTS = [
         positions TEXT NOT NULL DEFAULT '{}',
         unrealized_pnl TEXT NOT NULL DEFAULT '0',
         realized_pnl TEXT NOT NULL DEFAULT '0',
+        equity_complete INTEGER NOT NULL DEFAULT 1,
         metadata TEXT NOT NULL DEFAULT '{}',
         FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT
     )
@@ -408,6 +409,14 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         print(f"Migrating table: {table}")
         src_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         print(f"Source {table} has {src_count} rows")
+
+        # equity_snapshots 테이블에 equity_complete 컬럼이 없으면 추가
+        if table == "equity_snapshots":
+            cols = conn.execute("PRAGMA table_info(equity_snapshots)").fetchall()
+            col_names = [c[1] for c in cols]
+            if "equity_complete" not in col_names:
+                print("Adding equity_complete column to equity_snapshots...")
+                conn.execute("ALTER TABLE equity_snapshots ADD COLUMN equity_complete INTEGER NOT NULL DEFAULT 1")
 
         print(f"Copying data from {table} to {new_table}...")
         conn.execute(f"INSERT INTO {new_table} SELECT * FROM {table}")

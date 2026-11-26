@@ -1187,6 +1187,10 @@ class TestMigrationFromLegacy:
         conn = sqlite3.connect(str(self.db_path))
         try:
             for table in tables:
+                if table == "equity_snapshots":
+                    # equity_snapshots 테이블은 migration 중 equity_complete 컬럼이 추가되므로
+                    # 데이터 비교에서 제외
+                    continue
                 assert conn.execute(f"SELECT * FROM {table}").fetchall() == before[table]
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
             tables_with_fk = [

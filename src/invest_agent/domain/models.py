@@ -174,6 +174,7 @@ class EquitySnapshot:
     positions: dict[str, dict[str, Any]] = field(default_factory=dict)
     unrealized_pnl: Decimal = Decimal("0")
     realized_pnl: Decimal = Decimal("0")
+    equity_complete: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

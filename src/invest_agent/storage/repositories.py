@@ -414,6 +414,17 @@ class AgentRunRepository:
             ).fetchall()
             return [self._row_to_run(row) for row in rows]
 
+    def get_by_date_range(self, start: datetime, end: datetime) -> list[AgentRun]:
+        """특정 기간의 실행 기록 조회 (UTC 기준)."""
+        start_str = start.date().isoformat()
+        end_str = end.date().isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_runs WHERE date(started_at) BETWEEN ? AND ? ORDER BY started_at DESC",
+                (start_str, end_str),
+            ).fetchall()
+            return [self._row_to_run(row) for row in rows]
+
     def _row_to_run(self, row: sqlite3.Row) -> AgentRun:
         return AgentRun(
             id=UUID(row["id"]),
@@ -658,8 +669,8 @@ class EquitySnapshotRepository:
                 """
                 INSERT INTO equity_snapshots
                 (id, run_id, timestamp, total_equity, cash_balance, positions,
-                 unrealized_pnl, realized_pnl, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 unrealized_pnl, realized_pnl, equity_complete, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     run_id=excluded.run_id,
                     timestamp=excluded.timestamp,
@@ -668,6 +679,7 @@ class EquitySnapshotRepository:
                     positions=excluded.positions,
                     unrealized_pnl=excluded.unrealized_pnl,
                     realized_pnl=excluded.realized_pnl,
+                    equity_complete=excluded.equity_complete,
                     metadata=excluded.metadata
                 """,
                 (
@@ -679,6 +691,7 @@ class EquitySnapshotRepository:
                     json.dumps(snapshot.positions),
                     str(snapshot.unrealized_pnl),
                     str(snapshot.realized_pnl),
+                    1 if snapshot.equity_complete else 0,
                     json.dumps(snapshot.metadata),
                 ),
             )
@@ -709,6 +722,17 @@ class EquitySnapshotRepository:
                 return None
             return self._row_to_snapshot(row)
 
+    def get_by_date_range(self, start: datetime, end: datetime) -> list[EquitySnapshot]:
+        """특정 기간의 평가 스냅샷 조회 (UTC 기준)."""
+        start_str = start.date().isoformat()
+        end_str = end.date().isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM equity_snapshots WHERE date(timestamp) BETWEEN ? AND ? ORDER BY timestamp ASC",
+                (start_str, end_str),
+            ).fetchall()
+            return [self._row_to_snapshot(row) for row in rows]
+
     def _row_to_snapshot(self, row: sqlite3.Row) -> EquitySnapshot:
         return EquitySnapshot(
             id=UUID(row["id"]),
@@ -719,6 +743,7 @@ class EquitySnapshotRepository:
             positions=json.loads(row["positions"]) if row["positions"] else {},
             unrealized_pnl=Decimal(row["unrealized_pnl"]),
             realized_pnl=Decimal(row["realized_pnl"]),
+            equity_complete=bool(row["equity_complete"]),
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
         )
 

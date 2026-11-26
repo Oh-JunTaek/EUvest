@@ -8,7 +8,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 DDL_STATEMENTS = [
     # theses 테이블
@@ -555,6 +555,36 @@ def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
     print("Migration v5 -> v6 completed")
 
 
+def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """v6 -> v7 마이그레이션: equity_snapshots에 equity_complete 컬럼 추가.
+
+    기존 v6 DB에서 equity_complete 컬럼이 없는 경우 추가합니다.
+    기본값은 0(False)로 설정하여 과거 데이터는 평가 완전하지 않음으로 표시합니다.
+    (과거 데이터의 평가 완전성은 별도 검증 필요)
+    """
+    # equity_snapshots 테이블 존재 확인
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='equity_snapshots'"
+    ).fetchone()
+    if not exists:
+        print("equity_snapshots table does not exist, skipping equity_complete column addition")
+        return
+
+    cols = conn.execute("PRAGMA table_info(equity_snapshots)").fetchall()
+    col_names = [c[1] for c in cols]
+    if "equity_complete" not in col_names:
+        print("Adding equity_complete column to equity_snapshots (v6 -> v7)...")
+        # NOT NULL DEFAULT 0로 추가 - 과거 데이터는 기본적으로 완전하지 않음으로 표시
+        # (사용자가 명시적으로 완전하다고 확인한 데이터만 True로 설정)
+        conn.execute("ALTER TABLE equity_snapshots ADD COLUMN equity_complete INTEGER NOT NULL DEFAULT 0")
+        print("Added equity_complete column with DEFAULT 0")
+    else:
+        print("equity_complete column already exists")
+    print("Migration v6 -> v7 completed")
+
+
+
+
 def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
     """마이그레이션 실행 (현재 버전 -> 타겟 버전)."""
     if target_version != SCHEMA_VERSION:
@@ -606,6 +636,12 @@ def migrate(db_path: str | Path, target_version: int = SCHEMA_VERSION) -> None:
             _migrate_v5_to_v6(conn)
             current = 6
 
+
+
+        # v6 -> v7
+        if current == 6 and target_version >= 7:
+            _migrate_v6_to_v7(conn)
+            current = 7
         conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                      (target_version, datetime.now(UTC).isoformat()))
         if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:

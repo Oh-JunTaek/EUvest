@@ -308,6 +308,17 @@ class DecisionRepository:
             ).fetchall()
             return [self._row_to_decision(row) for row in rows]
 
+    def get_by_date_range(self, start: datetime, end: datetime) -> list[Decision]:
+        """특정 기간의 의사결정 조회 (UTC 기준)."""
+        start_str = start.isoformat()
+        end_str = end.isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM decisions WHERE decided_at >= ? AND decided_at <= ? ORDER BY decided_at ASC",
+                (start_str, end_str),
+            ).fetchall()
+            return [self._row_to_decision(row) for row in rows]
+
     def _row_to_decision(self, row: sqlite3.Row) -> Decision:
         return Decision(
             id=UUID(row["id"]),

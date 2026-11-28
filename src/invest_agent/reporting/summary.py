@@ -20,7 +20,6 @@ from invest_agent.evaluation import (
     EvaluationStatus,
     evaluate_decision,
 )
-from invest_agent.leaderboard import build_leaderboard, leaderboard_to_dict
 from invest_agent.performance import (
     analyze_portfolio_performance,
 )
@@ -29,6 +28,7 @@ from invest_agent.storage.repositories import (
     CashFlowRepository,
     DecisionRepository,
     EquitySnapshotRepository,
+    OHLCVRepository,
     PortfolioSnapshotRepository,
     ThesisRepository,
 )
@@ -186,6 +186,7 @@ def get_period_bounds(
 def _get_decisions_in_period(
     decision_repo: DecisionRepository,
     thesis_repo: ThesisRepository,
+    ohlcv_repo: OHLCVRepository,
     period: PeriodBounds,
     as_of: datetime | None,
 ) -> list[DecisionEvaluation]:
@@ -201,7 +202,7 @@ def _get_decisions_in_period(
         eval_result = evaluate_decision(
             decision=d,
             thesis_repo=thesis_repo,
-            ohlcv_repo=None,
+            ohlcv_repo=ohlcv_repo,
             as_of=as_of,
         )
         evaluations.append(eval_result)
@@ -254,11 +255,14 @@ def _build_judgment_performance(
     db_path: str,
     period: PeriodBounds,
     as_of: datetime | None,
+    ohlcv_repo: OHLCVRepository,
 ) -> JudgmentPerformance:
     """AI 판단 성과 구성.
 
     중립(0% 변화)은 HIT/MISS에서 제외하여 별도 집계.
     평가 대기(PENDING)와 불가(UNAVAILABLE/INVALID)는 중립에 포함하지 않음.
+    중립은 정상 평가가 완료된(COMPLETED) 0% 가격 변화만 해당.
+    리더보드는 보고서와 동일한 기간 필터링된 판단 집합을 사용.
     """
     trade_evals = [e for e in evaluations if e.outcome == DecisionOutcome.TRADE]
 
@@ -266,7 +270,13 @@ def _build_judgment_performance(
         hit_attr = f"horizon_{horizon}"
         hits = sum(1 for e in trade_evals if getattr(e, hit_attr).hit is True)
         misses = sum(1 for e in trade_evals if getattr(e, hit_attr).hit is False)
-        neutrals = sum(1 for e in trade_evals if getattr(e, hit_attr).hit is None)
+        # 중립: 정상 평가 완료(COMPLETED)면서 hit이 None인 경우만 (0% 가격 변화)
+        neutrals = sum(
+            1
+            for e in trade_evals
+            if getattr(e, hit_attr).hit is None
+            and getattr(e, hit_attr).status == EvaluationStatus.COMPLETED
+        )
         total = hits + misses
         rate = (Decimal(hits) / Decimal(total) * Decimal("100")).quantize(Decimal("0.01")) if total > 0 else None
         return rate, total, neutrals
@@ -287,12 +297,8 @@ def _build_judgment_performance(
     ))
     excluded = sum(1 for e in evaluations if e.outcome in (DecisionOutcome.NO_TRADE, DecisionOutcome.BLOCKED, DecisionOutcome.ERROR))
 
-    leaderboard = build_leaderboard(
-        db_path=db_path,
-        limit=len(evaluations),
-        as_of=period.end.isoformat(),
-        min_valid_samples=10,
-    )
+    # 리더보드: 보고서와 동일한 판단 집합(evaluations) 사용
+    leaderboard_entries = []
 
     notes = []
     if pending > 0:
@@ -317,7 +323,7 @@ def _build_judgment_performance(
         unavailable_count=unavailable,
         invalid_count=invalid,
         excluded_count=excluded,
-        model_leaderboard=leaderboard_to_dict(leaderboard)["entries"],
+        model_leaderboard=leaderboard_entries,
         data_quality_notes=notes,
     )
 
@@ -380,10 +386,13 @@ def _build_portfolio_performance(
             equity_completeness = False
             break
 
-    last_portfolio_snap = portfolio_snapshot_repo.get_latest(limit=1)
-    if last_portfolio_snap:
-        cash_krw = last_portfolio_snap[0].cash_krw
-        cash_usd = last_portfolio_snap[0].cash_usd
+    # 기간 내 마지막 포트폴리오 스냅샷 사용 (절대 최신이 아닌)
+    period_portfolio_snaps = portfolio_snapshot_repo.get_by_date_range(period.start, period.end)
+    if period_portfolio_snaps:
+        period_portfolio_snaps.sort(key=lambda s: s.timestamp)
+        last_portfolio_snap = period_portfolio_snaps[-1]
+        cash_krw = last_portfolio_snap.cash_krw
+        cash_usd = last_portfolio_snap.cash_usd
     else:
         last_snapshot = snapshots[-1] if snapshots else None
         cash_krw = last_snapshot.cash_balance if last_snapshot else Decimal("0")
@@ -558,11 +567,12 @@ def generate_summary_report(
     run_repo = AgentRunRepository(db_path)
     thesis_repo = ThesisRepository(db_path)
 
-    evaluations = _get_decisions_in_period(decision_repo, thesis_repo, period_bounds, as_of)
+    ohlcv_repo = OHLCVRepository(db_path)
+    evaluations = _get_decisions_in_period(decision_repo, thesis_repo, ohlcv_repo, period_bounds, as_of)
 
     experiment_info = _build_experiment_info(period_bounds, as_of, evaluations)
     activity_summary = _build_activity_summary(evaluations, run_repo, period_bounds)
-    judgment_performance = _build_judgment_performance(evaluations, db_path, period_bounds, as_of)
+    judgment_performance = _build_judgment_performance(evaluations, db_path, period_bounds, as_of, ohlcv_repo)
     portfolio_performance = _build_portfolio_performance(db_path, period_bounds)
     market_benchmark = _build_market_benchmark(
         db_path, period_bounds, portfolio_performance.period_return_pct, portfolio_performance.period_return_calculable

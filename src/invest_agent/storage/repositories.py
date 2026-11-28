@@ -829,6 +829,17 @@ class PortfolioSnapshotRepository:
             ).fetchall()
             return [self._row_to_snapshot(row) for row in rows]
 
+    def get_by_date_range(self, start: datetime, end: datetime) -> list[PortfolioSnapshot]:
+        """특정 기간의 포트폴리오 스냅샷 조회 (UTC 기준)."""
+        start_str = start.date().isoformat()
+        end_str = end.date().isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM portfolio_snapshots WHERE date(timestamp) BETWEEN ? AND ? ORDER BY timestamp ASC",
+                (start_str, end_str),
+            ).fetchall()
+            return [self._row_to_snapshot(row) for row in rows]
+
     def _row_to_snapshot(self, row: sqlite3.Row) -> PortfolioSnapshot:
         return PortfolioSnapshot(
             id=UUID(row["id"]),

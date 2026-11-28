@@ -11,24 +11,31 @@ from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 
+from invest_agent.benchmark import (
+    compare_with_benchmarks,
+)
 from invest_agent.domain.models import DecisionOutcome, OrderSide, RunStatus
 from invest_agent.evaluation import (
     DecisionEvaluation,
     EvaluationStatus,
-    evaluate_decisions,
+    evaluate_decision,
 )
 from invest_agent.leaderboard import build_leaderboard, leaderboard_to_dict
+from invest_agent.performance import (
+    analyze_portfolio_performance,
+)
 from invest_agent.storage.repositories import (
     AgentRunRepository,
     CashFlowRepository,
     DecisionRepository,
     EquitySnapshotRepository,
+    PortfolioSnapshotRepository,
     ThesisRepository,
 )
 
 
 class ReportPeriod(StrEnum):
-    """리포트 기간 유형."""
+    """리포트 주기."""
     WEEKLY = "weekly"
     MONTHLY = "monthly"
     CUSTOM = "custom"
@@ -108,6 +115,8 @@ class PortfolioPerformance:
     cash_usd: Decimal
     positions_summary: list[dict]
     equity_completeness: bool
+    period_return_calculable: bool
+    non_calculable_reasons: list[str]
 
 
 @dataclass(frozen=True)
@@ -123,7 +132,7 @@ class MarketBenchmark:
 
 @dataclass(frozen=True)
 class OperationsQuality:
-    """운영 및 데이터 품질."""
+    """운영 품질 및 해석 참고사항."""
     risk_blocks: list[str]
     market_data_gaps: list[str]
     provider_mismatches: list[str]
@@ -161,10 +170,10 @@ def get_period_bounds(
         label = f"월간 ({start_dt.date().isoformat()} ~ {end_dt.date().isoformat()})"
     else:
         if not start or not end:
-            raise ValueError("Custom 기간에는 start와 end가 필요합니다")
+            raise ValueError("Custom 기간은 start와 end가 모두 필요합니다")
         start_dt = start
         end_dt = end
-        label = f"사용자 지정 ({start_dt.date().isoformat()} ~ {end_dt.date().isoformat()})"
+        label = f"사용자지정 ({start_dt.date().isoformat()} ~ {end_dt.date().isoformat()})"
 
     return PeriodBounds(
         start=start_dt.replace(hour=0, minute=0, second=0, microsecond=0),
@@ -178,22 +187,26 @@ def _get_decisions_in_period(
     decision_repo: DecisionRepository,
     thesis_repo: ThesisRepository,
     period: PeriodBounds,
+    as_of: datetime | None,
 ) -> list[DecisionEvaluation]:
-    """기간 내 전체 판단 조회 후 평가."""
-    decisions = decision_repo.get_latest(200)
+    """기간 내 의사결정 조회 및 평가.
 
-    filtered = []
+    DecisionRepository.get_by_date_range를 사용하여 기간 조건을 적용한 직접 조회 수행.
+    평가와 리더보드가 동일한 판단 집합을 사용하도록 함.
+    """
+    decisions = decision_repo.get_by_date_range(period.start, period.end)
+
+    evaluations = []
     for d in decisions:
-        if period.start <= d.decided_at <= period.end:
-            filtered.append(d)
+        eval_result = evaluate_decision(
+            decision=d,
+            thesis_repo=thesis_repo,
+            ohlcv_repo=None,
+            as_of=as_of,
+        )
+        evaluations.append(eval_result)
 
-    evaluations, _ = evaluate_decisions(
-        db_path=decision_repo.db_path,
-        limit=len(filtered),
-        as_of=period.end,
-    )
-
-    return [e for e in evaluations if period.start <= e.decided_at <= period.end]
+    return evaluations
 
 
 def _build_activity_summary(
@@ -240,8 +253,13 @@ def _build_judgment_performance(
     evaluations: list[DecisionEvaluation],
     db_path: str,
     period: PeriodBounds,
+    as_of: datetime | None,
 ) -> JudgmentPerformance:
-    """AI 판단 성과 구성."""
+    """AI 판단 성과 구성.
+
+    중립(0% 변화)은 HIT/MISS에서 제외하여 별도 집계.
+    평가 대기(PENDING)와 불가(UNAVAILABLE/INVALID)는 중립에 포함하지 않음.
+    """
     trade_evals = [e for e in evaluations if e.outcome == DecisionOutcome.TRADE]
 
     def calc_hit_rate(horizon: str) -> tuple[Decimal | None, int, int]:
@@ -278,11 +296,11 @@ def _build_judgment_performance(
 
     notes = []
     if pending > 0:
-        notes.append(f"평가 대기(PENDING) {pending}건: 종가 확정 시각 미도래")
+        notes.append(f"평가 대기(PENDING) {pending}건: 종가 확정 시각 이후 평가 필요")
     if unavailable > 0:
-        notes.append(f"데이터 없음(UNAVAILABLE) {unavailable}건: 해당 거래일 OHLCV 부재")
+        notes.append(f"데이터 없음(UNAVAILABLE) {unavailable}건: OHLCV 데이터 누락")
     if invalid > 0:
-        notes.append(f"잘못된 데이터(INVALID) {invalid}건: 가격 0 이하 등")
+        notes.append(f"잘못된 데이터(INVALID) {invalid}건: 기준가격 0 이하 등")
 
     return JudgmentPerformance(
         hit_rate_1d=hit_rate_1d,
@@ -308,8 +326,15 @@ def _build_portfolio_performance(
     db_path: str,
     period: PeriodBounds,
 ) -> PortfolioPerformance:
-    """포트폴리오 성과 구성."""
+    """포트폴리오 성과 구성 - performance.py의 Modified Dietz 계산 재사용.
+
+    실제 시작/종료 스냅샷, 해당 구간의 외부 현금흐름, 입출금 시점별 가중치,
+    KRW/USD 및 환율 근거, 평가 완전성, 원장 완전성을 모두 고려.
+    필수 데이터가 없으면 계산 불가로 표시.
+    """
+
     equity_repo = EquitySnapshotRepository(db_path)
+    portfolio_snapshot_repo = PortfolioSnapshotRepository(db_path)
     cashflow_repo = CashFlowRepository(db_path)
 
     snapshots = equity_repo.get_by_date_range(period.start, period.end)
@@ -323,23 +348,50 @@ def _build_portfolio_performance(
     withdrawals = sum(cf.amount for cf in cashflows if cf.flow_type.value == "WITHDRAWAL")
     external_cash_flow = deposits - withdrawals
 
+    try:
+        perf_intervals = analyze_portfolio_performance(db_path, limit=100)
+        target_interval = None
+        for interval in perf_intervals:
+            if interval.start_snapshot.timestamp >= period.start and interval.end_snapshot.timestamp <= period.end:
+                target_interval = interval
+                break
+    except Exception:
+        perf_intervals = []
+        target_interval = None
+
     period_return_pct = None
     adjusted_pnl = None
+    period_return_calculable = False
+    non_calculable_reasons = []
+
+    if target_interval and target_interval.calculable:
+        period_return_pct = target_interval.period_return_pct
+        adjusted_pnl = target_interval.adjusted_change
+        period_return_calculable = True
+    else:
+        if not target_interval:
+            non_calculable_reasons.append("리포트 기간에 해당하는 스냅샷 구간이 없음 (최소 2개 필요)")
+        else:
+            non_calculable_reasons.extend(target_interval.non_calculable_reasons)
+
     equity_completeness = True
-
-    if start_equity and end_equity and start_equity > 0:
-        adjusted_pnl = end_equity - start_equity - external_cash_flow
-        period_return_pct = (adjusted_pnl / start_equity * Decimal("100")).quantize(Decimal("0.01"))
-
     for s in snapshots:
         if not s.equity_complete:
             equity_completeness = False
             break
 
-    last_snapshot = snapshots[-1] if snapshots else None
+    last_portfolio_snap = portfolio_snapshot_repo.get_latest(limit=1)
+    if last_portfolio_snap:
+        cash_krw = last_portfolio_snap[0].cash_krw
+        cash_usd = last_portfolio_snap[0].cash_usd
+    else:
+        last_snapshot = snapshots[-1] if snapshots else None
+        cash_krw = last_snapshot.cash_balance if last_snapshot else Decimal("0")
+        cash_usd = Decimal("0")
+
     positions = []
-    if last_snapshot and last_snapshot.positions:
-        for asset_id, pos in last_snapshot.positions.items():
+    if snapshots and snapshots[-1].positions:
+        for asset_id, pos in snapshots[-1].positions.items():
             positions.append({
                 "asset_id": asset_id,
                 "quantity": pos.get("quantity", "0"),
@@ -354,25 +406,66 @@ def _build_portfolio_performance(
         external_cash_flow=external_cash_flow,
         adjusted_pnl=adjusted_pnl,
         period_return_pct=period_return_pct,
-        cash_krw=last_snapshot.cash_balance if last_snapshot else Decimal("0"),
-        cash_usd=Decimal("0"),
+        cash_krw=cash_krw,
+        cash_usd=cash_usd,
         positions_summary=positions,
         equity_completeness=equity_completeness,
+        period_return_calculable=period_return_calculable,
+        non_calculable_reasons=non_calculable_reasons,
     )
 
 
 def _build_market_benchmark(
+    db_path: str,
     period: PeriodBounds,
     portfolio_return: Decimal | None,
+    portfolio_calculable: bool,
 ) -> MarketBenchmark:
-    """시장 벤치마크 구성."""
+    """시장 벤치마크 비교 구성 - benchmark.py의 compare_with_benchmarks 재사용.
+
+    저장된 OHLCV만 사용, 외부 공급자 호출 없음.
+    데이터가 없거나 정확성을 입증할 수 없다면 계산 불가로 표시.
+    """
+    notes = []
+    kospi200_return_pct = None
+    spy_return_pct = None
+    excess_return_pct = None
+    price_as_of = None
+
+    try:
+        benchmark_results = compare_with_benchmarks(
+            db_path=db_path,
+            limit=100,
+            benchmarks=["KOSPI200", "SPY_ETF"],
+            provider=None,
+            max_freshness_days=5,
+        )
+        for result in benchmark_results:
+            if result.portfolio_start >= period.start and result.portfolio_end <= period.end:
+                if result.benchmark_name == "KOSPI200":
+                    kospi200_return_pct = result.benchmark_return_pct
+                    if result.excess_calculable and result.excess_return_pct is not None:
+                        excess_return_pct = result.excess_return_pct
+                    price_as_of = result.benchmark_end_date
+                    if not result.benchmark_calculable:
+                        notes.extend(result.non_calculable_reasons)
+                elif result.benchmark_name == "SPY_ETF":
+                    spy_return_pct = result.benchmark_return_pct
+                    if not result.benchmark_calculable:
+                        notes.extend(result.non_calculable_reasons)
+    except Exception as e:
+        notes.append(f"벤치마크 계산 오류: {e}")
+
+    if not kospi200_return_pct and not spy_return_pct:
+        notes.append("벤치마크 데이터 없음 또는 계산 불가 (저장된 OHLCV 부족)")
+
     return MarketBenchmark(
-        kospi200_return_pct=None,
-        spy_return_pct=None,
+        kospi200_return_pct=kospi200_return_pct,
+        spy_return_pct=spy_return_pct,
         benchmark_currency="KRW",
-        price_as_of=period.end.isoformat(),
-        excess_return_pct=None,
-        comparison_notes=["벤치마크 데이터는 외부 공급자 연동 시 계산 가능"],
+        price_as_of=price_as_of,
+        excess_return_pct=excess_return_pct,
+        comparison_notes=notes,
     )
 
 
@@ -380,7 +473,7 @@ def _build_operations_quality(
     evaluations: list[DecisionEvaluation],
     period: PeriodBounds,
 ) -> OperationsQuality:
-    """운영 및 데이터 품질 구성."""
+    """운영 품질 및 해석 참고사항 구성."""
     risk_blocks = []
     market_data_gaps = []
     provider_mismatches = []
@@ -392,18 +485,23 @@ def _build_operations_quality(
     unavailable = sum(1 for e in evaluations if any(
         getattr(e, f"horizon_{h}").status == EvaluationStatus.UNAVAILABLE for h in ["1d", "5d", "20d"]
     ))
+    invalid = sum(1 for e in evaluations if any(
+        getattr(e, f"horizon_{h}").status == EvaluationStatus.INVALID for h in ["1d", "5d", "20d"]
+    ))
 
     if pending > 0:
-        market_data_gaps.append(f"미확정 종가 대기: {pending}건")
+        market_data_gaps.append(f"평가 대기(PENDING) {pending}건: 종가 확정 시각 이후 평가 필요")
     if unavailable > 0:
-        market_data_gaps.append(f"OHLCV 데이터 없음: {unavailable}건")
+        market_data_gaps.append(f"OHLCV 데이터 없음(UNAVAILABLE): {unavailable}건")
+    if invalid > 0:
+        market_data_gaps.append(f"잘못된 데이터(INVALID): {invalid}건")
 
     interpretation_notes = [
-        "방향 적중률은 가격 방향 예측 정확도이며 실제 매매 수익률(수수료, 세금, 체결가)과 다름",
-        "NO_TRADE, BLOCKED, ERROR는 적중률 분모에서 제외됨",
-        "가격 변화율 0은 중립으로 분류되며 적중률 분모에서 제외됨",
-        "동일 모델의 반복 판단은 상관된 표본일 수 있음",
-        "포트폴리오 수익률은 입출금 조정된 단순 수익률이며 Modified Dietz가 아님",
+        "판단 적중률은 HIT+MISS 표본만으로 산출, 중립(0% 변화)은 분모에서 제외",
+        "NO_TRADE, BLOCKED, ERROR는 방향 적중률 평가에서 제외",
+        "기준가격 0 또는 데이터 없음은 평가 불가로 분류",
+        "포트폴리오 성과는 Modified Dietz(시간가중 현금흐름) 방식 사용",
+        "벤치마크 비교는 저장된 OHLCV만 사용, 외부 API 호출 없음",
     ]
 
     return OperationsQuality(
@@ -460,16 +558,18 @@ def generate_summary_report(
     run_repo = AgentRunRepository(db_path)
     thesis_repo = ThesisRepository(db_path)
 
-    evaluations = _get_decisions_in_period(decision_repo, thesis_repo, period_bounds)
+    evaluations = _get_decisions_in_period(decision_repo, thesis_repo, period_bounds, as_of)
 
     experiment_info = _build_experiment_info(period_bounds, as_of, evaluations)
     activity_summary = _build_activity_summary(evaluations, run_repo, period_bounds)
-    judgment_performance = _build_judgment_performance(evaluations, db_path, period_bounds)
+    judgment_performance = _build_judgment_performance(evaluations, db_path, period_bounds, as_of)
     portfolio_performance = _build_portfolio_performance(db_path, period_bounds)
-    market_benchmark = _build_market_benchmark(period_bounds, portfolio_performance.period_return_pct)
+    market_benchmark = _build_market_benchmark(
+        db_path, period_bounds, portfolio_performance.period_return_pct, portfolio_performance.period_return_calculable
+    )
     operations_quality = _build_operations_quality(evaluations, period_bounds)
 
-    return SummaryReport(#MARKER#MARKER
+    return SummaryReport(
         experiment_info=experiment_info,
         activity_summary=activity_summary,
         judgment_performance=judgment_performance,
@@ -483,8 +583,15 @@ def format_summary_report_markdown(report: SummaryReport) -> str:
     """통합 리포트를 Markdown으로 포맷팅."""
     def fmt_rate(val: Decimal | None) -> str:
         if val is None:
-            return "—"
+            return chr(0x2014)
         return f"{val:.2f}%"
+
+    def fmt_decimal(val: Decimal | None, decimals: int = 0) -> str:
+        if val is None:
+            return chr(0x2014)
+        if decimals == 0:
+            return f"{val:,.0f}"
+        return f"{val:,.{decimals}f}"
 
     lines = [
         f"# 투자 실험 통합 리포트 - {report.experiment_info.period.label}",
@@ -539,8 +646,8 @@ def format_summary_report_markdown(report: SummaryReport) -> str:
         "",
         "### 방향 적중률",
         "",
-        "| 기간 | 적중률 | 유효 표본(HIT+MISS) | 중립 |",
-        "|------|--------|---------------------|------|",
+        "| 기간 | 적중률 | 유효 표본(HIT+MISS) | 중립(0% 변화) |",
+        "|------|--------|---------------------|--------------|",
     ])
     lines.append(f"| 1일(1D) | {fmt_rate(jp.hit_rate_1d)} | {jp.hit_rate_1d_denominator} | {jp.neutral_count_1d} |")
     lines.append(f"| 5일(5D) | {fmt_rate(jp.hit_rate_5d)} | {jp.hit_rate_5d_denominator} | {jp.neutral_count_5d} |")
@@ -550,14 +657,17 @@ def format_summary_report_markdown(report: SummaryReport) -> str:
     lines.extend([
         "### 평가 상태 요약",
         "",
-        f"- 평가 완료: {jp.completed_count}건",
+        f"- 평가 완료(HIT/MISS): {jp.completed_count}건",
         f"- 평가 대기(PENDING): {jp.pending_count}건",
         f"- 데이터 없음(UNAVAILABLE): {jp.unavailable_count}건",
-        ])
+        f"- 잘못된 데이터(INVALID): {jp.invalid_count}건",
+        f"- 적중률 산출 제외(NO_TRADE/BLOCKED/ERROR): {jp.excluded_count}건",
+        "",
+    ])
 
     if jp.model_leaderboard:
         lines.extend([
-            "### 모델별 리더보드 (5D 적중률 기준)",
+            "### 모델별 리더보드 (5D 적중률 기준, 최소 10 표본)",
             "",
             "| 순위 | 모델 | 유효표본 | 1D 적중률 | 5D 적중률 | 20D 적중률 |",
             "|------|------|----------|-----------|-----------|------------|",
@@ -566,9 +676,9 @@ def format_summary_report_markdown(report: SummaryReport) -> str:
             lines.append(
                 f"| {entry['rank']} | {entry['model_label']} | "
                 f"{entry['valid_sample_count']} | "
-                f"{fmt_rate(Decimal(entry['total_hit_rate_1d'])) if entry['total_hit_rate_1d'] else '—'} | "
-                f"{fmt_rate(Decimal(entry['total_hit_rate_5d'])) if entry['total_hit_rate_5d'] else '—'} | "
-                f"{fmt_rate(Decimal(entry['total_hit_rate_20d'])) if entry['total_hit_rate_20d'] else '—'} |"
+                f"{fmt_rate(Decimal(entry['total_hit_rate_1d'])) if entry['total_hit_rate_1d'] else chr(0x2014)} | "
+                f"{fmt_rate(Decimal(entry['total_hit_rate_5d'])) if entry['total_hit_rate_5d'] else chr(0x2014)} | "
+                f"{fmt_rate(Decimal(entry['total_hit_rate_20d'])) if entry['total_hit_rate_20d'] else chr(0x2014)} |"
             )
         lines.append("")
 
@@ -585,20 +695,28 @@ def format_summary_report_markdown(report: SummaryReport) -> str:
     lines.extend([
         "## IV. 포트폴리오 성과",
         "",
-        "| 지표 | 값 |",
+        "| 항목 | 값 |",
         "|------|-----|",
-        f"| 기간 시작 평가액 | {pp.start_equity:,.0f} KRW |" if pp.start_equity else "| 기간 시작 평가액 | — |",
-        f"| 기간 종료 평가액 | {pp.end_equity:,.0f} KRW |" if pp.end_equity else "| 기간 종료 평가액 | — |",
-        f"| 순 외부 현금흐름 | {pp.external_cash_flow:,.0f} KRW |",
-        f"| 입출금 조정 손익 | {pp.adjusted_pnl:,.0f} KRW |" if pp.adjusted_pnl else "| 입출금 조정 손익 | — |",
-        f"| 기간 수익률 | {pp.period_return_pct:.2f}% |" if pp.period_return_pct else "| 기간 수익률 | — |",
+        f"| 기간 시작 평가액 | {fmt_decimal(pp.start_equity)} KRW |" if pp.start_equity else f"| 기간 시작 평가액 | {chr(0x2014)} |",
+        f"| 기간 종료 평가액 | {fmt_decimal(pp.end_equity)} KRW |" if pp.end_equity else f"| 기간 종료 평가액 | {chr(0x2014)} |",
+        f"| 순외부현금흐름 | {fmt_decimal(pp.external_cash_flow)} KRW |",
+        f"| 입출금 조정 손익 | {fmt_decimal(pp.adjusted_pnl)} KRW |" if pp.adjusted_pnl else f"| 입출금 조정 손익 | {chr(0x2014)} |",
+        f"| 기간 수익률 (Modified Dietz) | {fmt_rate(pp.period_return_pct)} |" if pp.period_return_calculable else "| 기간 수익률 | 계산 불가 |",
         f"| 평가 완전성 | {'완전' if pp.equity_completeness else '불완전'} |",
         "",
     ])
 
+
+    if pp.non_calculable_reasons:
+        lines.append("### 수익률 계산 불가 사유")
+        lines.append("")
+        for reason in pp.non_calculable_reasons:
+            lines.append(f"- {reason}")
+        lines.append("")
+
     if pp.positions_summary:
         lines.extend([
-            "### 보유 자산 요약",
+            "### 보유 종목 상세",
             "",
             "| 종목 | 수량 | 평균단가 | 현재가 | 통화 |",
             "|------|------|----------|--------|------|",
@@ -608,8 +726,8 @@ def format_summary_report_markdown(report: SummaryReport) -> str:
         lines.append("")
 
     lines.extend([
-        f"| KRW 현금 | {pp.cash_krw:,.0f} KRW |",
-        f"| USD 현금 | {pp.cash_usd:,.2f} USD |",
+        f"| KRW 현금 | {fmt_decimal(pp.cash_krw)} KRW |",
+        f"| USD 현금 | {fmt_decimal(pp.cash_usd, 2)} USD |" if pp.cash_usd else f"| USD 현금 | {chr(0x2014)} (데이터 없음) |",
         "",
     ])
 
@@ -621,7 +739,7 @@ def format_summary_report_markdown(report: SummaryReport) -> str:
         f"- SPY ETF: {fmt_rate(mb.spy_return_pct)}",
         f"- 초과수익률: {fmt_rate(mb.excess_return_pct)}",
         f"- 기준 통화: {mb.benchmark_currency}",
-        f"- 가격 기준 시점: {mb.price_as_of}",
+        f"- 가격 기준일: {mb.price_as_of or chr(0x2014)}",
         "",
     ])
 
@@ -631,12 +749,12 @@ def format_summary_report_markdown(report: SummaryReport) -> str:
 
     oq = report.operations_quality
     lines.extend([
-        "## VI. 운영 및 데이터 품질",
+        "## VI. 운영 품질 및 해석 참고사항",
         "",
     ])
 
     if oq.market_data_gaps:
-        lines.append("### 시장 데이터 결측")
+        lines.append("### 시장 데이터 공백")
         for gap in oq.market_data_gaps:
             lines.append(f"- {gap}")
         lines.append("")
@@ -647,12 +765,18 @@ def format_summary_report_markdown(report: SummaryReport) -> str:
             lines.append(f"- {block}")
         lines.append("")
 
-    lines.append("### 해석상 제약사항")
+    lines.append("### 해석 참고사항")
     for note in oq.interpretation_notes:
         lines.append(f"- {note}")
     lines.append("")
 
     return "\n".join(lines)
+
+
+
+
+
+
 
 
 def save_summary_report(
